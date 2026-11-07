@@ -1,6 +1,6 @@
 # Roadmap
 
-**Next to build:** `resolve-bridge`, the shared base every other skill uses.
+**Next to build:** `video-tighten` (dead air and cut edges).
 
 ## Who this is for
 
@@ -27,13 +27,14 @@ Every session starts from the latest saved state, and every step ends with a sav
 
 ## The skills
 
-### 0. `resolve-bridge` (shared library)
+### 0. `resolve-bridge` (shared library) — **built (v0.1)**
 
-- Talk to Resolve: Blackmagic's built-in MCP (Resolve 21.1+) or the Python scripting API directly. Evaluate [samuelgursky/davinci-resolve-mcp](https://github.com/samuelgursky/davinci-resolve-mcp) as an optional base instead of rebuilding API coverage.
-- Plan schema: clips, source in/out, track, plus fields later skills add (`zoom`, `pan`, `tilt`, `grade_group`, `fades`).
-- Exact-length appends (high-fps sources on a lower-fps timeline round badly; retry until the timeline length matches).
-- State file, versioning and archiving as described above.
-- Helpers: slice transcription (local Whisper, language detection), energy-based voice activity detection, still export at a timecode.
+- `skills/resolve-bridge/scripts/rvs.py`: Python library + CLI over Resolve's scripting API.
+- Two ways to make a version: **fork** (duplicate the timeline, change it in place; keeps grades, titles, effects) and **build** (fresh timeline from a plan file, for structural cuts).
+- State file, saved project after every step, archive folder, hand-edit detection (`check`, `sync`; `begin` syncs automatically, `build` refuses until synced).
+- Plan format: [skills/resolve-bridge/references/plan-format.md](../skills/resolve-bridge/references/plan-format.md).
+- Tested on Resolve Studio 21.2 with a 65-item, 4K 60 fps → 1080p 24 fps timeline: export → build round trip is identical.
+- Still to add (with the skills that need them): slice transcription, voice activity detection, still export.
 
 ### 1. `video-ingest`: random raw files → organised catalogue
 
@@ -114,7 +115,7 @@ Every session starts from the latest saved state, and every step ends with a sav
 
 Now:
 
-1. `resolve-bridge`
+1. ~~`resolve-bridge`~~ done
 2. `video-tighten`
 3. `video-framing`
 4. `video-sound`
