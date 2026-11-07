@@ -259,16 +259,24 @@ _CMP_KEYS = ("media", "track", "audio_track", "path", "clip", "start", "end", "s
 
 
 def _norm(d: dict) -> tuple:
+    """Comparison key. src_start is compared separately, with a tolerance (see _same_src)."""
     out = []
     for k in _CMP_KEYS:
         v = d.get(k)
-        if k == "path" and v is None:
+        if k == "src_start" or (k == "path" and v is None):
             continue
         if isinstance(v, dict):
             v = json.dumps({kk: round(vv, 3) if isinstance(vv, float) else vv for kk, vv in v.items()},
                            sort_keys=True)
         out.append((k, v))
     return tuple(out)
+
+
+def _same_src(a: dict, b: dict, tl_fps: float) -> bool:
+    """Source starts within one timeline frame count as equal: Resolve rounds high-fps source starts."""
+    fps = a.get("src_fps") or b.get("src_fps") or tl_fps or 1
+    tol = max(1.0, fps / tl_fps) if tl_fps else 1.0
+    return abs((a.get("src_start") or 0) - (b.get("src_start") or 0)) <= tol
 
 
 def _where(d: dict) -> str:
@@ -293,10 +301,19 @@ def _field_changes(a: dict, b: dict) -> str:
 
 def diff_plans(old: dict, new: dict) -> list[str]:
     """Human-readable differences between two plans (empty list = identical)."""
-    a = {_norm(d): d for d in old.get("items", [])}
-    b = {_norm(d): d for d in new.get("items", [])}
-    gone = [a[k] for k in a.keys() - b.keys()]
-    came = [b[k] for k in b.keys() - a.keys()]
+    fps = (new.get("timeline") or old.get("timeline") or {}).get("fps", 0)
+    pool: dict = {}
+    for d in new.get("items", []):
+        pool.setdefault(_norm(d), []).append(d)
+    gone = []
+    for d in old.get("items", []):
+        cands = pool.get(_norm(d), [])
+        match = next((c for c in cands if _same_src(d, c, fps)), None)
+        if match is None:
+            gone.append(d)
+        else:
+            cands.remove(match)
+    came = [d for lst in pool.values() for d in lst]
     lines = []
     slot = lambda d: (d.get("track"), d.get("audio_track"), d["start"])
     came_by_slot = {slot(d): d for d in came}

@@ -1,6 +1,6 @@
 # Roadmap
 
-**Next to build:** `video-tighten` (dead air and cut edges).
+**Next to build:** `video-framing` (declutter crop, punch-ins, eye-trace).
 
 ## Who this is for
 
@@ -51,12 +51,14 @@ Every session starts from the latest saved state, and every step ends with a sav
 - Output: plan + a "still to shoot" list.
 - Script source is pluggable: a Markdown script file by default, adapters for other tools.
 
-### 3. `video-tighten`: remove dead air, natural edges
+### 3. `video-tighten`: remove dead air, natural edges — **built (v0.1)**
 
-- Cut edges from voice activity, not transcript timestamps: ~0.22 s before the first word, ~0.38 s after the last (configurable).
-- Pauses inside a take over ~0.6 s shortened to ~0.25 s, never splitting a breath.
-- J/L cuts on setup changes: next line's audio starts 4 to 8 frames before its picture.
-- Backends: own VAD (default), Resolve 21.2's `RippleDeleteSilence`, or [auto-editor](https://github.com/WyattBlue/auto-editor).
+- Edges from measured speech: 0.22 s before the first word, 0.38 s after the last. Edges may grow up to 0.5 s into silence of the same take to rescue clipped word endings, never into other sound.
+- Pauses over 0.75 s inside a clip shortened to 0.3 s (each saves at least 0.45 s). `--skip` protects performed pauses.
+- Ripple with b-roll remapped onto the new timing. Dry run + report first, `--apply` builds.
+- Speech detection: `resolve-bridge/scripts/rvs_audio.py` (energy-based, whole-file thresholds, hysteresis on word edges; pure Python + ffmpeg).
+- Tested on a 5:47, 65-item cut from 4K 60 fps phone footage: gave 18 edges (16 tails, 2 heads) more room where the cut was clipping or crowding a word, and flagged 2 cuts that need a different take.
+- Later: J/L cuts, filler-word removal (needs transcription).
 
 ### 4. `video-framing`: declutter, zooms, eye-trace
 
@@ -116,7 +118,7 @@ Every session starts from the latest saved state, and every step ends with a sav
 Now:
 
 1. ~~`resolve-bridge`~~ done
-2. `video-tighten`
+2. ~~`video-tighten`~~ done
 3. `video-framing`
 4. `video-sound`
 5. `video-color`
