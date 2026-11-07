@@ -24,6 +24,7 @@ AI agent skills that edit scripted talking-head videos in DaVinci Resolve Studio
 
 - **Nothing is overwritten.** Every step creates a new timeline. Older versions move to an `Archive` folder in the media pool.
 - **Steps build on each other across sessions.** A state file in your video project records which step is done and which timeline is current. Each new agent session continues from there.
+- **A checklist per video.** `EDIT_CHECKLIST.md` in your project folder shows the next step, what is done or skipped, open issues to check (with clip and timecode), and your own notes. Tick an issue in the file to close it.
 - **Your manual edits are kept.** If you change the timeline in Resolve between steps, the next step reads your changes in first.
 - **Runs locally.** Transcription uses Whisper on your machine. No paid speech-to-text API key needed.
 

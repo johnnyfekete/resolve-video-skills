@@ -24,6 +24,7 @@ Every session starts from the latest saved state, and every step ends with a sav
 3. **End of every skill:** build the new timeline, `project.SaveProject()`, write the new plan and state entry. The step only counts as done after the save succeeds.
 4. **Old versions** move into an `Archive` media pool folder. The newest timeline stays at the top level. Nothing is deleted.
 5. **"Where are we?"**: any session can print the step history and the next step from the state file.
+6. **Checklist** (`<project>/EDIT_CHECKLIST.md`), regenerated after every change: next step, pipeline status (done / skipped / to do), open issues from any skill with clip + timecode, resolved issues, history, and a notes section that is never overwritten. Ticking an issue's box in the file closes it.
 
 ## The skills
 

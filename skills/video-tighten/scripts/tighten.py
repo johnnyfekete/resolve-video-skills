@@ -39,6 +39,10 @@ def plan_tighten(plan: dict, opt) -> tuple[dict, dict]:
     speech.sort(key=lambda d: (d["start"], d.get("track") or 0))
     others = [d for d in items if d not in speech]
     report = {"settings": vars(opt).copy(), "items": [], "flags": []}
+    flagged = []
+
+    def flag(d, text):
+        flagged.append((d, text))
     report["settings"].pop("func", None)
 
     # 1. measure + decide new source ranges per speech item
@@ -55,7 +59,7 @@ def plan_tighten(plan: dict, opt) -> tuple[dict, dict]:
             entry["note"] = ("skipped on request; left as is" if skipped else
                              "overlaps the previous speech item; left as is" if overlap else "no file path; left as is")
             if not skipped:
-                report["flags"].append(f"{d['clip']} @{d['start']}: {entry['note']}")
+                flag(d, entry["note"])
             d["_pieces"] = [(s0, e0)]
             report["items"].append(entry)
             continue
@@ -68,7 +72,7 @@ def plan_tighten(plan: dict, opt) -> tuple[dict, dict]:
         inside = [s for s in segs if s[1] > s0 and s[0] < e0]
         if not inside:
             entry["note"] = "no speech found; left as is"
-            report["flags"].append(f"{d['clip']} @{d['start']}: no speech detected")
+            flag(d, "no speech detected")
             d["_pieces"] = [(s0, e0)]
             report["items"].append(entry)
             continue
@@ -84,11 +88,11 @@ def plan_tighten(plan: dict, opt) -> tuple[dict, dict]:
         new_in = max(lo, first[0] - opt.pre)
         new_out = min(hi, last[1] + opt.post)
         if first[0] < lo:
-            report["flags"].append(f"{d['clip']} @{d['start']}: first word starts {s0 - first[0]:.2f}s before the "
-                                   "in-point and cannot be recovered (other speech or too far). Check this cut.")
+            flag(d, f"first word starts {s0 - first[0]:.2f}s before the in-point and other sound is right before "
+                    "it, so the edge cannot move. Listen to this cut; it may need a different take.")
         if last[1] > hi:
-            report["flags"].append(f"{d['clip']} @{d['start']}: last word runs {last[1] - e0:.2f}s past the "
-                                   "out-point and cannot be recovered. Check this cut.")
+            flag(d, f"last word runs {last[1] - e0:.2f}s past the out-point and other sound follows it, so the "
+                    "edge cannot move. Listen to this cut; it may need a different take.")
         # pauses
         cuts = []
         if not opt.no_pauses:
@@ -136,6 +140,7 @@ def plan_tighten(plan: dict, opt) -> tuple[dict, dict]:
                           "src_end": src_s + math.ceil(n * sf / tl_fps)})
             new_items.append(piece)
             pmap.append((a, b, pos))
+            d.setdefault("_new_start", pos)
             pos += n
         mapping.append((d["start"], d["end"], d, pmap))
         if cursor_old is None or d["end"] >= cursor_old:
@@ -165,11 +170,21 @@ def plan_tighten(plan: dict, opt) -> tuple[dict, dict]:
         p_old_e, p_new_e = prev
         return p_new_e + (t - p_old_e)
 
+    def tc(frame):
+        sec = frame / tl_fps
+        return f"{int(sec // 60):02d}:{sec % 60:05.2f}"
+
+    for d, text in flagged:
+        report["flags"].append({"clip": d["clip"], "where": f"{d['clip']} at {tc(d.get('_new_start', d['start']))}",
+                                "text": text})
+
     # 3. remap everything else (b-roll, overlays, music)
     for d in others:
         ns, ne = remap(d["start"]), remap(d["end"])
         if ne - ns < opt.min_overlay * tl_fps:
-            report["flags"].append(f"dropped {d['clip']} @{d['start']}-{d['end']}: under {opt.min_overlay}s after tightening")
+            report["flags"].append({"clip": d["clip"], "where": f"{d['clip']} near {tc(ns)}",
+                                    "text": f"b-roll dropped: it would be under {opt.min_overlay}s after tightening. "
+                                            "Re-place it if the section needs cover."})
             continue
         sf = d.get("src_fps") or tl_fps
         n = d.copy()
@@ -190,6 +205,7 @@ def plan_tighten(plan: dict, opt) -> tuple[dict, dict]:
                         "pieces_after": sum(1 for d in new_items if d["media"] in ("both", "audio"))}
     for d in items:
         d.pop("_pieces", None)
+        d.pop("_new_start", None)
     return new_plan, report
 
 
@@ -201,7 +217,7 @@ def write_report(report: dict, path: Path):
              f"{r['counts']['speech_items']} speech items, {r['counts']['pauses_cut']} pauses shortened.\n"]
     if r["flags"]:
         lines.append("## Check these by eye/ear\n")
-        lines += [f"- {f}" for f in r["flags"]]
+        lines += [f"- **{f['where']}**: {f['text']}" for f in r["flags"]]
         lines.append("")
     lines.append("## Per item (seconds; head/tail: + = later/longer, - = earlier/shorter)\n")
     lines.append("| Clip | Timeline in | Head | Tail | Pauses cut | Removed |")
@@ -255,6 +271,10 @@ def main(argv=None):
                        f"runtime {rt['before_s']}s -> {rt['after_s']}s")
             entry = s.build(new_plan, "tighten", summary)
             print(f"v{entry['version']:02d} saved: {entry['timeline']}")
+            added = [s.add_issue("tighten", f["text"], f["where"]) for f in report["flags"]]
+            added = [i for i in added if i]
+            if added:
+                print(f"{len(added)} issues added to {s.checklist_path.name}: " + ", ".join(i["id"] for i in added))
         else:
             print("dry run: nothing changed in Resolve. Re-run with --apply to build.")
     except rvs.RvsError as e:

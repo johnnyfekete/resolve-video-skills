@@ -32,6 +32,9 @@ import re
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import rvs_checklist  # noqa: E402
+
 PLAN_SCHEMA = "rvs.plan/1"
 STATE_SCHEMA = "rvs.state/1"
 STATE_DIR = ".edit"
@@ -341,7 +344,10 @@ class Session:
         self.dir = self.workdir / STATE_DIR
         self.state_path = self.dir / "state.json"
         self.state = json.loads(self.state_path.read_text()) if self.state_path.exists() else None
+        self.checklist_path = self.workdir / rvs_checklist.FILENAME
         self.resolve = self.project = None
+        if self.state:
+            self._pull_checklist()
         if connect_now:
             self.resolve, self.project = connect()
             if self.state and self.state["resolve_project"] != self.project.GetName():
@@ -358,6 +364,60 @@ class Session:
         tmp = self.state_path.with_suffix(".tmp")
         tmp.write_text(json.dumps(self.state, indent=1, ensure_ascii=False))
         tmp.replace(self.state_path)
+        self.write_checklist()
+
+    # -- checklist, issues, skipped steps
+    def _pull_checklist(self) -> bool:
+        """Apply ticks the user made in EDIT_CHECKLIST.md. Returns True if anything changed."""
+        ticked, _ = rvs_checklist.read_back(self.checklist_path)
+        changed = False
+        for i in self.state.setdefault("issues", []):
+            if i["id"] in ticked and i["status"] == "open":
+                i.update({"status": "resolved", "resolved": _now(), "resolution": "ticked in the checklist"})
+                changed = True
+        if changed:
+            self._save_state()
+        return changed
+
+    def write_checklist(self) -> Path:
+        _, notes = rvs_checklist.read_back(self.checklist_path)
+        self.checklist_path.write_text(rvs_checklist.render(self.state, notes, _now()))
+        return self.checklist_path
+
+    def add_issue(self, step: str, text: str, where: str | None = None) -> dict | None:
+        """Record something a person must check or fix. Duplicates (same step + text) are ignored."""
+        self._require_state()
+        issues = self.state.setdefault("issues", [])
+        if any(i["step"] == step and i["text"] == text for i in issues):
+            return None
+        issue = {"id": f"I{len(issues) + 1}", "step": step, "text": text, "status": "open", "created": _now()}
+        if where:
+            issue["where"] = where
+        issues.append(issue)
+        self._save_state()
+        return issue
+
+    def resolve_issue(self, issue_id: str, note: str = "") -> dict:
+        self._require_state()
+        for i in self.state.get("issues", []):
+            if i["id"].lower() == issue_id.lower():
+                i.update({"status": "resolved", "resolved": _now(), "resolution": note})
+                self._save_state()
+                return i
+        raise RvsError(f"No issue {issue_id}.")
+
+    def skip_step(self, step: str, reason: str = ""):
+        self._require_state()
+        names = [p[0] for p in rvs_checklist.PIPELINE]
+        if step not in names:
+            raise RvsError(f"Unknown step '{step}'. Steps: {', '.join(names)}")
+        self.state.setdefault("skipped", {})[step] = reason
+        self._save_state()
+
+    def unskip_step(self, step: str):
+        self._require_state()
+        self.state.setdefault("skipped", {}).pop(step, None)
+        self._save_state()
 
     def _write_plan(self, plan: dict, version: int, step: str) -> str:
         rel = f"plans/v{version:02d}_{_slug(step)}.json"
@@ -675,6 +735,13 @@ def _print_status(s: Session):
     if st.get("pending"):
         p = st["pending"]
         print(f"IN PROGRESS: step '{p['step']}' on '{p['timeline']}' since {p['date']}")
+    open_issues = [i for i in st.get("issues", []) if i["status"] == "open"]
+    print(f"Open issues: {len(open_issues)}")
+    for i in open_issues:
+        print(f"  {i['id']} ({i['step']}) {i['text']}")
+    nxt = rvs_checklist.next_step(st)
+    print(f"Next step: {nxt[0]} ({nxt[1]})" if nxt else "Next step: none, pipeline complete")
+    print(f"Checklist: {s.checklist_path}")
     if s.project:
         changes = s.check()
         print(f"Hand edits since last step: {len(changes)}" + (" (run: rvs.py sync)" if changes else ""))
@@ -701,6 +768,22 @@ def main(argv=None):
     f = sub.add_parser("finish", help="archive previous version, save project, record the step")
     f.add_argument("--summary", required=True)
     sub.add_parser("abandon", help="forget the pending step (its timeline stays in Resolve)")
+    sub.add_parser("checklist", help="regenerate EDIT_CHECKLIST.md in the working folder")
+    iss = sub.add_parser("issue", help="things a person must check or fix")
+    isub = iss.add_subparsers(dest="issue_cmd", required=True)
+    ia = isub.add_parser("add")
+    ia.add_argument("text")
+    ia.add_argument("--step", default="manual")
+    ia.add_argument("--where", help="e.g. a clip name or timecode")
+    ir = isub.add_parser("resolve")
+    ir.add_argument("id")
+    ir.add_argument("--note", default="")
+    isub.add_parser("list")
+    sk = sub.add_parser("skip", help="mark a pipeline step as not needed for this video")
+    sk.add_argument("step")
+    sk.add_argument("--reason", default="")
+    us = sub.add_parser("unskip")
+    us.add_argument("step")
     bl = sub.add_parser("build", help="create a new version from a plan file (structural steps)")
     bl.add_argument("plan")
     bl.add_argument("--step", required=True)
@@ -738,6 +821,26 @@ def main(argv=None):
         elif args.cmd == "abandon":
             p = s.abandon_step()
             print(f"dropped pending step '{p['step']}'. Timeline '{p['timeline']}' is still in Resolve.")
+        elif args.cmd == "checklist":
+            s._require_state()
+            print(s.write_checklist())
+        elif args.cmd == "issue":
+            if args.issue_cmd == "add":
+                i = s.add_issue(args.step, args.text, args.where)
+                print(f"added {i['id']}" if i else "already recorded")
+            elif args.issue_cmd == "resolve":
+                i = s.resolve_issue(args.id, args.note)
+                print(f"resolved {i['id']}")
+            else:
+                s._require_state()
+                for i in s.state.get("issues", []):
+                    print(f"{i['id']:>4} {i['status']:<8} ({i['step']}) {i['text']}")
+        elif args.cmd == "skip":
+            s.skip_step(args.step, args.reason)
+            print(f"skipped {args.step}")
+        elif args.cmd == "unskip":
+            s.unskip_step(args.step)
+            print(f"{args.step} is back in the pipeline")
         elif args.cmd == "build":
             plan = json.loads(Path(args.plan).read_text())
             entry = s.build(plan, args.step, args.summary)

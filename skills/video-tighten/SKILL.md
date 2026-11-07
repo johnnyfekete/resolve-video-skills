@@ -21,7 +21,7 @@ Requires the **resolve-bridge** skill installed next to this one (it finds it at
    ```bash
    python3 scripts/tighten.py --workdir <folder> --skip ... --apply
    ```
-   Builds `<base>_vNN_tighten`, archives the previous version, saves the project. Tell the user the new timeline name.
+   Builds `<base>_vNN_tighten`, archives the previous version, saves the project. Every flag becomes an issue in `EDIT_CHECKLIST.md`, located by clip name and timecode in the new timeline. Tell the user the new timeline name and the issue ids.
 
 ## What it does
 
