@@ -16,6 +16,7 @@ import re
 import shutil
 import subprocess
 import sys
+import unicodedata
 from collections import Counter
 from pathlib import Path
 
@@ -170,9 +171,10 @@ def load_config(session) -> dict:
 def _data(value) -> str:
     """Make a recorded value safe to show in AGENTS.md: one short line of inline code, unable to end the
     generated block or read as a new instruction."""
-    text = re.sub(r"[\x00-\x1f\x7f\u2028\u2029]+", " ", str(value))
-    text = text.replace("<!--", "").replace("-->", "").replace("`", "'").strip()
-    return f"`{text[:300]}`"
+    # Categories C* and Z* cover control, format (bidi) and line-separator characters.
+    text = "".join(" " if unicodedata.category(c)[0] in "CZ" else c for c in str(value))
+    text = re.sub(r" +", " ", text).strip()[:300]
+    return "`" + text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("`", "'") + "`"
 
 
 def render_agents(config: dict, state: dict | None) -> str:
@@ -241,10 +243,11 @@ def write_agents(path: Path, block: str):
         path.write_text(block)
         return "created"
     text = path.read_text()
-    start = text.find(BLOCK_START)
-    end = text.find(BLOCK_END, start + len(BLOCK_START)) if start >= 0 else -1
-    if end >= 0:
-        path.write_text(text[:start] + block.rstrip("\n") + text[end + len(BLOCK_END):])
+    # Markers count only when they fill a whole line.
+    start = re.search(rf"^{re.escape(BLOCK_START)}[ \t]*$", text, re.M)
+    end = re.search(rf"^{re.escape(BLOCK_END)}[ \t]*$", text[start.end():], re.M) if start else None
+    if end:
+        path.write_text(text[:start.start()] + block.rstrip("\n") + text[start.end() + end.end():])
         return "updated"
     path.write_text(text.rstrip("\n") + "\n\n" + block)
     return "appended to the existing file"
