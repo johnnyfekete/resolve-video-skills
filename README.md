@@ -2,12 +2,13 @@
 
 AI agent skills that edit scripted talking-head videos in DaVinci Resolve Studio. You give it raw takes and a script. It builds the cut, frames it, grades it, mixes it and makes vertical shorts, all as **editable Resolve timelines**, not a flattened mp4.
 
-> **Status: early.** Available now: `resolve-bridge` (the versioned, always-saved base the other skills build on) and `video-tighten` (cut edges and pauses). The other skills are next. See [docs/ROADMAP.md](docs/ROADMAP.md).
+> **Status: early.** Available now: `resolve-bridge` (the versioned, always-saved base the other skills build on) `video-setup` (prepares each video project) and `video-tighten` (cut edges and pauses). The other skills are next. See [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## What it does
 
 | Step | Skill | What you get |
 |---|---|---|
+| Set up | `video-setup` | Tools and footage checked, first timeline tracked, an `AGENTS.md` with the editing rules for that video |
 | Organise | `video-ingest` | Raw files in random order → transcribed, matched to the script, b-roll catalogued |
 | First cut | `video-assemble` | Best take per script line, b-roll placed, a list of shots still missing |
 | Pacing | `video-tighten` | Dead air removed, natural breathing room at every cut |
@@ -44,6 +45,8 @@ npx skills add johnnyfekete/resolve-video-skills
 This uses the open [skills CLI](https://github.com/vercel-labs/skills). It detects which AI agents you have installed and copies the skills into each one. To install a single skill, add `--skill video-tighten`.
 
 Then in Resolve: Preferences → System → General → External scripting using: **Local**.
+
+For each new video, start your agent in that video's folder and ask it to run `video-setup`.
 
 ## Credits and related projects
 

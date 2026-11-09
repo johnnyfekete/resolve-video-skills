@@ -37,6 +37,12 @@ Every session starts from the latest saved state, and every step ends with a sav
 - Tested on Resolve Studio 21.2 with a 65-item, 4K 60 fps → 1080p 24 fps timeline: export → build round trip is identical.
 - Still to add (with the skills that need them): slice transcription, voice activity detection, still export.
 
+### `video-setup`: one-time project preparation — **built (v0.1)**
+
+- Read-only check of tools, Resolve Studio version, timeline and colour settings, and footage formats.
+- Records the script location and per-video settings, starts tracking the first timeline, marks skipped steps.
+- Generates `AGENTS.md` for the video: always build on the latest version, where versions and files go, how hand edits and issues work. Text outside the generated block is kept.
+
 ### 1. `video-ingest`: random raw files → organised catalogue
 
 - Transcribe every clip in short slices (~30 s). Whisper on long files drops repeated takes and stretches word timestamps.
