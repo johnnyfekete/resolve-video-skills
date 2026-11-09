@@ -18,6 +18,7 @@ NOTES_END = "<!-- notes:end -->"
 PIPELINE = [
     ("ingest", "video-ingest", "Transcribe raw clips, match them to the script, catalogue b-roll"),
     ("assemble", "video-assemble", "First cut: best take per line, b-roll placed"),
+    ("broll", "video-assemble", "B-roll placed over the matching lines"),
     ("tighten", "video-tighten", "Natural cut edges, shorter pauses"),
     ("framing", "video-framing", "Declutter crop, punch-ins on jump cuts, eye-trace, push-ins"),
     ("color", "video-color", "HDR to Rec.709, one grade per setup"),
