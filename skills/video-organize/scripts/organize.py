@@ -207,8 +207,9 @@ def _issues(data: dict, mode: str, broll_data: dict) -> list[tuple[str, str]]:
             usable = [t for t in ds if t["status"] in score.STATUS_OK]
             if tokens(sc.text) and not usable:
                 wanted.append((f"{sc.id}: no complete or reworded take", _where(sc.id, best)))
-            if best and best.get("broken") and not data["patches"].get(sc.id) and \
-                    not any(t is not best for t in usable):
+            covered = {c for p in data["patches"].get(sc.id, []) for c in p["clauses"]}
+            unfixed = {b["clause"] for b in best.get("broken") or []} - covered if best else set()
+            if unfixed and not any(t is not best for t in usable):
                 wanted.append((f"{sc.id}: best take {best['id']} has a broken part no whole-clause patch can "
                                "fix; it needs a patch smaller than a clause or a new take", _where(sc.id, best)))
             if sc.broll and sc.id not in matched and described:
@@ -256,8 +257,11 @@ def _finish(workdir: Path, data: dict, issues: bool = True) -> None:
 def cmd_run(workdir: Path, args) -> int:
     org = _org(workdir)
     config = _config(workdir)
-    sb = args.storyboard or config.get("storyboard")
-    sb_path = str((workdir / sb).resolve()) if sb else None
+    if args.storyboard:
+        sb_path = str(Path(args.storyboard).resolve())
+    else:
+        sb = config.get("storyboard")
+        sb_path = str((workdir / sb).resolve()) if sb else None
     scenes, mode = storyboard.load(sb_path)
     footage = Path(args.footage).resolve()
     if not footage.is_dir():
@@ -337,7 +341,9 @@ def _next_steps(workdir: Path, data: dict, broll_data: dict) -> None:
 
 def cmd_describe(workdir: Path, args) -> int:
     data = store.load(_org(workdir))
-    payload = json.loads(Path(args.payload).read_text())
+    root = Path(data.get("footage") or ".")
+    payload = {str(Path(f).resolve() if Path(f).is_absolute() else (root / f).resolve()): entry
+               for f, entry in json.loads(Path(args.payload).read_text()).items()}
     broll.record_descriptions(_org(workdir), payload, {sc.id for sc in _scenes(data)})
     _finish(workdir, data)
     return 0
@@ -360,9 +366,14 @@ def cmd_answer(workdir: Path, args) -> int:
         shots[file] = letter
         keep = [d for d in data["takes"] if not (d["scene"] == args.scene and d["file"] == file)]
         renewed = store.assign_ids(keep, [_take(d) for d in data["takes"]], data["shots"], issued=data["issued"])
+        moved = {}
         for new, old in zip(renewed, data["takes"]):
             new.update({k: old[k] for k in SCORE_FIELDS if k in old})
+            if old.get("id") and new["id"] != old["id"]:
+                moved[old["id"]] = new["id"]
         data["takes"] = renewed
+        for pick in data["picks"].values():  # same file and range, new id: the pick follows it
+            pick["id"] = moved.get(pick["id"], pick["id"])
     _analyse(data, data.get("mode", "none"))
     _finish(workdir, data)
     return 0
@@ -413,7 +424,7 @@ def main(argv: list[str] | None = None) -> int:
                 "report": cmd_report}
     try:
         return commands[args.cmd](workdir, args)
-    except (OrganizeError, ValueError, rvs.RvsError) as e:
+    except (OrganizeError, ValueError, OSError, rvs.RvsError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
 

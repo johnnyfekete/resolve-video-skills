@@ -43,11 +43,30 @@ def say(t0, text):
     return [[w, round(t0 + i * 0.4, 3), round(t0 + i * 0.4 + 0.3, 3)] for i, w in enumerate(text.split())]
 
 
+def say_clauses(t0, text):
+    """Like say(), with an extra 0.3 s pause after each comma (a place to cut a patch)."""
+    out, t = [], t0
+    for w in text.split():
+        out.append([w, round(t, 3), round(t + 0.3, 3)])
+        t += 0.7 if w.endswith(",") else 0.4
+    return out
+
+
+PATCH_SCENE = "I opened the editor, I wrote the line, and I hit publish"
+PATCH_STORYBOARD = f"## S01\n{PATCH_SCENE}\n"
+PARTIAL = "I opened the editor, I wrote the line"  # incomplete, but clean in its first two clauses
+
 # Keyed by file length in seconds (see fixtures/fake_transcriber.py).
 CANNED = {
     "20": say(1.0, S01) + say(6.0, "one more time") + say(8.0, S01) + say(13.0, "very nice") + say(15.0, S02),
     "24": say(2.0, S02) + say(10.0, "this coffee is getting cold again today honestly") + say(16.0, "okay"),
     "10": [],
+    # best take has a restart in clause 0, which the partial take can patch
+    "30": say_clauses(1.0, "I opened the the editor, I wrote the line, and I hit publish")
+          + say_clauses(12.0, PARTIAL),
+    # restarts in clauses 0 and 2; the partial take can patch only clause 0
+    "34": say_clauses(1.0, "I opened the the editor, I wrote the line, and I hit hit publish")
+          + say_clauses(12.0, PARTIAL),
 }
 
 
@@ -74,6 +93,11 @@ class OrganizeCliTest(unittest.TestCase):
         recording(str(cls.rec2), 24)
         recording(str(cls.broll), 10, video="testsrc", audio="anullsrc=r=48000:cl=mono")
         (cls.footage / "._IMG_0001.MOV").write_bytes(b"")  # hidden: must be skipped
+        cls.patchable = Path(cls._media.name) / "patchable"
+        cls.half_patchable = Path(cls._media.name) / "half_patchable"
+        for folder, seconds in ((cls.patchable, 30), (cls.half_patchable, 34)):
+            folder.mkdir()
+            recording(str(folder / "IMG_0010.MOV"), seconds)
         cls.words = Path(cls._media.name) / "words.json"
         cls.words.write_text(json.dumps(CANNED))
 
@@ -199,6 +223,56 @@ class OrganizeCliTest(unittest.TestCase):
         self.assertIn('heard after the take: "very nice"', s01)
         self.assertIn("meaning unknown", s01)
         self.assertNotIn("on set", s01)
+
+    def patch_run(self, footage):
+        sb = self.work / "patch.md"
+        sb.write_text(PATCH_STORYBOARD)
+        self.cli("run", "--footage", str(footage), "--storyboard", str(sb), "--yes")
+        return self.section(self.takes_md(), "S01"), (self.work / "EDIT_CHECKLIST.md").read_text()
+
+    def test_patch_line_when_another_take_fixes_the_break(self):
+        s01, checklist = self.patch_run(self.patchable)
+        self.assertIn('patch: S01A-T01 + S01A-T02 from "I opened the editor', s01)
+        self.assertNotIn("smaller than a clause", checklist)
+
+    def test_issue_when_one_broken_run_has_no_patch(self):
+        s01, checklist = self.patch_run(self.half_patchable)
+        self.assertEqual(s01.count("patch: "), 1, s01)
+        self.assertIn('patch: S01A-T01 + S01A-T02 from "I opened the editor', s01)
+        self.assertIn("S01: best take S01A-T01 has a broken part", checklist)
+
+    def test_describe_accepts_paths_relative_to_footage(self):
+        self.run_all("--storyboard", str(self.storyboard))
+        payload = self.work / "payload.json"
+        payload.write_text(json.dumps({"day1/BROLL_0003.MOV": {"frames": {"2": "a thesaurus window"}}}))
+        self.cli("describe", str(payload))
+        self.assertIn("a thesaurus window", self.section(self.takes_md(), "B-roll"))
+        stored = json.loads((self.work / ".edit" / "organize" / "broll.json").read_text())
+        self.assertEqual(stored[str(self.broll.resolve())]["frames"], {"2": "a thesaurus window"})
+
+    def test_answer_moves_pick_to_new_id(self):
+        self.run_all("--storyboard", str(self.storyboard))
+        self.cli("pick", "S02A-T02")
+        self.cli("answer", "S02", str(self.rec2), "B")
+        self.assertEqual(self.data()["picks"]["S02"]["id"], "S02B-T01")
+        first = next(l for l in self.section(self.takes_md(), "S02").splitlines() if "S02" in l and "-T" in l)
+        self.assertIn("S02B-T01", first)
+        self.assertIn("picked by you", first)
+        self.assertNotIn("no longer matches", (self.work / "EDIT_CHECKLIST.md").read_text())
+
+    def test_missing_file_is_a_clean_error(self):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            code = organize.main(["--workdir", str(self.work), "describe", str(self.work / "nope.json")])
+        self.assertEqual(code, 1)
+        self.assertTrue(err.getvalue().startswith("error: "), err.getvalue())
+
+    def test_storyboard_option_resolves_against_cwd(self):
+        cwd = os.getcwd()
+        os.chdir(self.storyboard.parent.parent)
+        self.addCleanup(os.chdir, cwd)
+        out = self.cli("run", "--footage", str(self.footage), "--storyboard", "work/storyboard.md")
+        self.assertIn("4 scenes", out)
 
     def test_runs_without_resolve(self):
         with mock.patch.object(rvs, "connect", side_effect=AssertionError("Resolve must not be used")):
