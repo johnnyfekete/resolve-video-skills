@@ -22,8 +22,12 @@ page; they are written at timeline resolution.
 ## Calibration
 
 Inputs: crop rect in normalised **source** coordinates, origin top-left, centre `cx, cy`, width `w`
-(fraction of source width; the rect has the source aspect, so its height is `w` of source height).
+(fraction of source width; at matching aspect the rect has the source aspect, so its height is `w`
+of source height).
 `SW, SH` = source size in pixels, `TW, TH` = timeline size in pixels.
+
+**Measured and validated only for a source with the timeline's aspect** (16:9 source on a 16:9
+timeline). For that case:
 
     s    = max(TW / SW, TH / SH)        # "scale full frame with crop" fit factor (0.5 for 4K -> 1080p)
     Zoom = 1 / w                        # set ZoomX = ZoomY = Zoom
@@ -39,11 +43,30 @@ Equivalently, source point `(u, v)` lands at timeline pixel
 - **Units:** Pan and Tilt are timeline pixels, added after the zoom. They do not scale with Zoom.
   They do depend on timeline resolution: the same Pan is 2/3 as far on a 720p timeline as on 1080p,
   so the formula takes `TW, TH`.
-- Zoom scales about the frame centre (AnchorPointX/Y = 0). Zoom 1 shows the whole source.
+- Zoom scales about the frame centre (AnchorPointX/Y = 0). With matching aspect, Zoom 1 shows the
+  whole source.
 - `ZoomGang` defaults to True; with it on, setting only `ZoomX` also sets `ZoomY`. Set both anyway.
-- For a source with the timeline's aspect (16:9 into 16:9), `scaleToFit` gives the same `s`; the
-  formula differs only when aspects differ (`scaleToFit` uses `min`).
+- For matching aspect, `scaleToFit` gives the same `s`; the two differ only when aspects differ
+  (`scaleToFit` uses `min`).
 - Valid rects stay inside the source: `w <= 1`, `cx - w/2 >= 0`, `cx + w/2 <= 1`, same for `cy`.
+- `spike_resolve.py`'s `rect_to_props(cx, cy, w, tl_w, tl_h)` is the same maths as the later
+  `rect_to_props(rect, tl_w, tl_h)`; only the argument shape differs.
+
+**Non-matching aspect (4:3, vertical, square sources): derived, NOT measured.** Under scale full
+frame with crop such a source is already cropped at Zoom 1, so `Zoom = 1/w` and "Zoom 1 shows the
+whole source" do not hold. The general form follows from the point mapping above, which was only
+measured at matching aspect:
+
+    s    = max(TW / SW, TH / SH)
+    Zoom = TW / (w * SW * s)            # rect width w (of source width) fills the timeline width
+    Pan  = (0.5 - cx) * SW * s * Zoom
+    Tilt = (cy - 0.5) * SH * s * Zoom
+    # visible source at Zoom 1: TW/s by TH/s source pixels; the rect has the TIMELINE aspect,
+    # height = w * SW * TH / TW source pixels (= w of source height only when aspects match)
+
+At matching aspect `TW / (SW * s) = 1`, so this reduces to `Zoom = 1/w`. Callers should treat sources
+whose aspect differs from the timeline as unsupported, or use this derived form and say so in the
+report, until it is measured.
 
 Evidence (`calibration.json`):
 - Six fit cases (Zoom 1, 1.5, 2, 1.3x1.1 non-ganged; Pan/Tilt from -150 to 100): every chart dot within
@@ -100,6 +123,9 @@ spline.SetKeyFrames({t0: {1: 1.00, "RH": {1: dt, 2: 0.0}},
 - **Comp time:** 0 is the item's first frame (also for an item trimmed to start at source frame 60),
   and comp time counts **source frames**, not timeline frames: `t = item_frame * source_fps / timeline_fps`
   (a 60 fps clip on a 24 fps timeline: timeline frame 24 of the item = comp time 60).
+  Measured only for a constant 60 fps clip on a 24 fps timeline at 100% speed. Not verified for
+  variable-frame-rate sources (phone footage often is) or retimed/speed-changed items; check comp
+  times there (e.g. against `COMPN_RenderEnd` vs. item duration) or skip push-ins on such items.
 - **Coordinates:** Fusion `Pivot`/`Center` are normalised to the source image, origin **bottom-left**
   (y up), so a source point `(u, v)` with top-left origin is `{1: u, 2: 1 - v}`. The comp works at
   source resolution (3840x2160 here, `MediaIn` `TOOLI_Clip_Width/Height`).
@@ -117,3 +143,9 @@ spline.SetKeyFrames({t0: {1: 1.00, "RH": {1: dt, 2: 0.0}},
   `item.GetFusionCompNameList()` (`["Composition 1"]`), then
   `item.GetFusionCompByIndex(i).FindTool("rvs_pushin")`. Push-ins do not show in `GetProperty()`,
   and `item.GetEffects("fusion")` stays empty for a comp added this way.
+- **Removing / replacing (re-runs):** `TimelineItem.DeleteFusionCompByName(name) -> bool` (in the
+  shipped `DaVinciResolveScript.pyi`; the scripting folder has README.md, not README.txt). To replace
+  a push-in, find the comp whose `FindTool("rvs_pushin")` is set, using `GetFusionCompNameList()` and
+  `GetFusionCompByName(name)`, delete it with `DeleteFusionCompByName(name)`, then add a new comp.
+  Comps without that tool are the user's and stay. Also available: `RenameFusionCompByName(old, new)`,
+  `LoadFusionCompByName(name)` (makes it the active comp). Delete was not exercised in the spike.

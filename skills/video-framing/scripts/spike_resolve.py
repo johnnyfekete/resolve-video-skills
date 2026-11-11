@@ -7,7 +7,7 @@ Re-run it after a Resolve update to check that the notes in references/resolve-n
     python3 spike_resolve.py enter                 # remember the open project, load/create rvs_scratch_framing
     python3 spike_resolve.py calibrate --source CLIP.MOV
     python3 spike_resolve.py dynzoom
-    python3 spike_resolve.py fusion --source CLIP.MOV
+    python3 spike_resolve.py fusion
     python3 spike_resolve.py leave                 # reload the project that was open before `enter`
 
 Every command except enter/leave refuses to run unless the open project is a scratch project.
@@ -176,10 +176,13 @@ def set_props(item, props):
 # ---------------------------------------------------------------- formula (filled in from the fit)
 
 def rect_to_props(cx, cy, w, tl_w=TL_W, tl_h=TL_H, src_w=SRC_W, src_h=SRC_H):
-    """Crop rect in normalised source coords (centre cx, cy; width w; origin top-left; source aspect)
-    -> item properties under 'scaleToCrop'. See references/resolve-notes.md."""
-    zoom = 1.0 / w
+    """Crop rect in normalised source coords (centre cx, cy; width w as a fraction of source width;
+    origin top-left) -> item properties under 'scaleToCrop'. Same maths as the later
+    rect_to_props(rect, tl_w, tl_h). Measured only for source aspect == timeline aspect, where
+    zoom == 1/w; the tl_w / (w * src_w * fit) form for other aspects is derived, not measured.
+    See references/resolve-notes.md."""
     fit = max(tl_w / src_w, tl_h / src_h)            # scale full frame with crop
+    zoom = tl_w / (w * src_w * fit)
     pan = -(cx - 0.5) * src_w * fit * zoom           # timeline pixels, +x moves the image right
     tilt = (cy - 0.5) * src_h * fit * zoom           # timeline pixels, +y moves the image up
     return {"ZoomX": zoom, "ZoomY": zoom, "Pan": pan, "Tilt": tilt}
@@ -518,12 +521,18 @@ def cmd_fusion(args):
 # ---------------------------------------------------------------- enter / leave
 
 def cmd_enter(args):
+    """Remember the open project and its current timeline, then load (or create) the scratch project.
+
+    Warning: ProjectManager.LoadProject may make Resolve auto-save the project that was open, including
+    any unsaved hand edits in it. Run this only when the user knows their project will be switched."""
     resolve, project = rvs.connect()
     d = workdir(args)
     prev = project.GetName()
     pm = resolve.GetProjectManager()
     if not prev.startswith(SCRATCH_PREFIX):
+        tl = project.GetCurrentTimeline()
         (d / "previous_project.txt").write_text(prev)
+        (d / "previous_timeline.txt").write_text(tl.GetName() if tl else "")
     print("previous project:", prev)
     p = pm.LoadProject(SCRATCH_PROJECT) or pm.CreateProject(SCRATCH_PROJECT)
     if not p:
@@ -533,23 +542,30 @@ def cmd_enter(args):
 
 
 def cmd_leave(args):
+    """Save the scratch project, reload the project `enter` recorded and restore its current timeline."""
     resolve, project = scratch()
     d = workdir(args)
     prev = (d / "previous_project.txt").read_text().strip()
-    resolve.GetProjectManager().SaveProject()
-    ok = resolve.GetProjectManager().LoadProject(prev)
-    print("reloaded", prev, "->", bool(ok), resolve.GetProjectManager().GetCurrentProject().GetName())
+    tl_file = d / "previous_timeline.txt"
+    prev_tl = tl_file.read_text().strip() if tl_file.exists() else ""
+    pm = resolve.GetProjectManager()
+    pm.SaveProject()
+    p = pm.LoadProject(prev)
+    print("reloaded", prev, "->", bool(p), pm.GetCurrentProject().GetName())
+    if p and prev_tl:
+        tl = rvs.find_timeline(p, prev_tl)
+        ok = bool(tl) and p.SetCurrentTimeline(tl)
+        print("current timeline", prev_tl, "->", bool(ok))
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--workdir")
     sub = ap.add_subparsers(dest="cmd", required=True)
-    for name in ("enter", "leave", "dynzoom"):
+    for name in ("enter", "leave", "dynzoom", "fusion"):
         sub.add_parser(name)
-    for name in ("calibrate", "fusion"):
-        sp = sub.add_parser(name)
-        sp.add_argument("--source", help="4K clip, read only (calibrate: real-footage check)")
+    sp = sub.add_parser("calibrate")
+    sp.add_argument("--source", help="4K clip, read only, for the real-footage check")
     args = ap.parse_args()
     {"enter": cmd_enter, "leave": cmd_leave, "calibrate": cmd_calibrate,
      "dynzoom": cmd_dynzoom, "fusion": cmd_fusion}[args.cmd](args)
