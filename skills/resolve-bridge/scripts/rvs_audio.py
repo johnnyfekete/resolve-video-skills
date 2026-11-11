@@ -113,3 +113,25 @@ def probe_duration(path: str) -> float:
     r = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", path],
                        capture_output=True, text=True, check=True)
     return float(r.stdout.strip() or 0)
+
+
+def silence_cuts(path: str, target: float = 30.0, max_len: float = 45.0, stream: int = 0) -> list[tuple[float, float]]:
+    """Slice a file into consecutive (start, end) ranges covering 0..duration.
+
+    Each cut sits in the middle of the silence (gap between speech segments) nearest `target` seconds after
+    the previous cut. A slice is never longer than `max_len`; only if no silence exists in reach is there
+    a hard cut at `max_len`.
+    """
+    duration = probe_duration(path)
+    if duration <= max_len:
+        return [(0.0, round(duration, 3))]
+    segs = speech_segments(path, 0.0, duration, stream=stream)["segments"]
+    mids = [(a + b) / 2 for (_, a), (b, _) in zip(segs, segs[1:]) if b > a]
+    slices, cur = [], 0.0
+    while duration - cur > max_len:
+        cands = [m for m in mids if cur + 1.0 < m <= cur + max_len]
+        cut = min(cands, key=lambda m: abs(m - cur - target)) if cands else cur + max_len
+        slices.append((round(cur, 3), round(cut, 3)))
+        cur = round(cut, 3)
+    slices.append((cur, round(duration, 3)))
+    return slices
