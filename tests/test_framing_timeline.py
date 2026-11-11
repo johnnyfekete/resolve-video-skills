@@ -175,7 +175,7 @@ class BrollNamesTest(unittest.TestCase):
         self.assertEqual([i["track"] for i in on_camera(p)], [2])
 
     def test_track_name_variants(self):
-        for name in ("BROLL", "b roll", "My b-Roll"):
+        for name in ("BROLL", "b roll", "My b-Roll", "b_roll"):
             p = plan(vid("S08_IMG_1.MOV", 2, 0, 100), aud("S08_IMG_2.MOV", 0, 100))
             p["tracks"] = {"video": [{"index": 2, "name": name}]}
             self.assertEqual(on_camera(p), [], name)
@@ -186,7 +186,11 @@ class BrollNamesTest(unittest.TestCase):
                  vid("S43_IMG_3.MOV", 1, 200, 300, media="both"))
         self.assertEqual([i["clip"] for i in on_camera(p)], ["S43_IMG_3.MOV"])
 
-    def test_file_named_broll_in_the_path_only(self):
+    def test_file_named_b_roll_with_underscore(self):
+        p = plan(vid("S41_screen_b_roll.mov", 2, 0, 100), aud("S41_IMG_2.MOV", 0, 100))
+        self.assertEqual(on_camera(p), [])
+
+    def test_file_named_b_roll_in_the_path_only(self):
         it = vid("S41_x.mov", 2, 0, 100, path="/m/S41_screen-broll.mov")
         self.assertEqual(on_camera(plan(it, aud("S41_IMG_2.MOV", 0, 100))), [])
 

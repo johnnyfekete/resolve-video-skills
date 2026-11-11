@@ -280,19 +280,21 @@ def _with_reclassify(plan: dict, cam: list[dict], reclassify: dict) -> list[dict
 
 
 def framed_items(plan: dict, reclassify: dict, applied: dict | None = None) -> list[dict]:
-    """On-camera items framing will set: reclassified, not hidden under b-roll, not hand-framed."""
+    """On-camera items framing will set: reclassified, not covered by a higher track, not hand-framed."""
     cam = _with_reclassify(plan, on_camera(plan), reclassify)
     skip = hidden(plan, cam) | dec.hand_framed(cam, applied)
     return [i for i in cam if item_key(i) not in skip]
 
 
 def scaling_sources(plan: dict, reclassify: dict, applied: dict | None = None) -> dict:
-    """{clip name: (width, height)} of every source framing will set, one entry per file."""
-    out = {}
+    """{label: (width, height)}, one entry per source file framing will set. The label is the clip
+    name, with the path added when two files share a clip name."""
+    by_path = {}
     for it in framed_items(plan, reclassify, applied):
-        name = it.get("clip") or Path(it["path"]).name
-        out.setdefault(name, tuple(source_size(it["path"])))
-    return out
+        by_path.setdefault(it["path"], it.get("clip") or Path(it["path"]).name)
+    names = Counter(by_path.values())
+    return {(name if names[name] == 1 else f"{name} ({path})"): tuple(source_size(path))
+            for path, name in by_path.items()}
 
 
 def _reclassify(fdir: Path) -> dict:
@@ -498,7 +500,7 @@ def run_solve(s, opt, workdir: Path) -> dict:
         if hk in hand:
             why = "the item is framed by hand and left alone"
         elif hk in unseen:
-            why = "b-roll covers the speaker for the whole item"
+            why = "a higher track covers the speaker for the whole item"
         elif host is not None:
             sf = float(host.get("src_fps") or fps)
             want = (host["end"] - host["start"]) * sf / fps
@@ -767,7 +769,7 @@ def write_report(sol: dict, data: dict, path: Path, previews: dict) -> None:
             L.append(f"- {h['key']} {h['clip']} at {h['timecode']} (setup {h['setup']}): {props}{comps}")
     else:
         L.append("None.")
-    L += ["", "## Hidden under b-roll (left as is)", ""]
+    L += ["", "## Covered by a higher track (left as is)", ""]
     if sol.get("hidden"):
         L.append("Fully covered by video on a higher track for their whole length: not framed, not flagged.")
         L += [f"- {h['key']} {h['clip']} at {h['timecode']} (setup {h['setup']})" for h in sol["hidden"]]
@@ -819,6 +821,11 @@ def apply(opt) -> int:
         scaling_sources(plan, _reclassify(fdir), dec.load_applied(fdir / "applied.json")),
         (int(plan["timeline"]["width"]), int(plan["timeline"]["height"])))
     _status(s)
+    plan = s.load_plan()   # hand edits may have been recorded as a new version: check that one too
+    apply_resolve.check_scaling(
+        s.current_timeline(), s.project,
+        scaling_sources(plan, _reclassify(fdir), dec.load_applied(fdir / "applied.json")),
+        (int(plan["timeline"]["width"]), int(plan["timeline"]["height"])))
     sol = run_solve(s, opt, workdir)
     _print_summary(sol, workdir)
     entry, issues = apply_resolve.apply(s, sol)

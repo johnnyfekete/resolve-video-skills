@@ -561,8 +561,8 @@ class HiddenUnderBrollTest(unittest.TestCase):
                          sol["flags"])
         self.assertEqual([h["key"] for h in sol["hidden"]], ["V1@240"])
         report = self.w.report()
-        self.assertIn("hidden under b-roll (left as is)", report.lower())
-        self.assertIn("V1@240", report.split("idden under b-roll", 1)[1])
+        self.assertIn("covered by a higher track (left as is)", report.lower())
+        self.assertIn("V1@240", report.lower().split("covered by a higher track", 1)[1].upper())
 
 
 class MergeFlagsTest(unittest.TestCase):
@@ -653,6 +653,25 @@ class AgentIssuesAndScalingCliTest(unittest.TestCase):
         self.assertIn("S02_B.MOV", out)
         self.assertNotIn("S01_A.MOV", out.split("error:", 1)[1])
         self.assertFalse(ap.called)
+
+    def test_apply_checks_scaling_again_after_recording_hand_edits(self):
+        self.w.decide()
+        with mock.patch.object(apply_resolve, "check_scaling") as chk:
+            code, out, ap = self._apply({str(self.w.a): (3840, 2160), str(self.w.b): (1920, 1080)})
+        self.assertEqual(code, 0, out)
+        self.assertEqual(chk.call_count, 2)
+
+    def test_scaling_sources_are_keyed_by_path(self):
+        p = {"timeline": {"fps": 24.0, "width": 1920, "height": 1080}, "tracks": {}, "items": [
+            _item("/m/one/S01_A.MOV", 0, 240, 0, "S01_A.MOV"),
+            _item("/m/two/S01_A.MOV", 240, 480, 0, "S01_A.MOV")]}
+        sizes = {"/m/one/S01_A.MOV": (3840, 2160), "/m/two/S01_A.MOV": (1440, 1080)}
+        with mock.patch.object(framing, "source_size", side_effect=lambda x: sizes[str(x)]):
+            src = framing.scaling_sources(p, {})
+        self.assertEqual(sorted(src.values()), [(1440, 1080), (3840, 2160)])
+        self.assertTrue(all("S01_A.MOV" in k for k in src))
+        msg = apply_resolve.scaling_problem("scaleToFit", src, (1920, 1080))
+        self.assertIn("/m/two/S01_A.MOV", msg)
 
     def test_prepare_side_warning(self):
         from rvs import Session

@@ -7,8 +7,7 @@ from __future__ import annotations
 import re
 
 _PREFIX_RE = re.compile(r"^(?:S\d+_)+")
-_BROLL_TRACK = re.compile(r"b[- ]?roll", re.IGNORECASE)   # "B-roll", "broll", "b roll"
-_BROLL_FILE = re.compile(r"b-?roll", re.IGNORECASE)       # "broll", "b-roll"
+_BROLL = re.compile(r"b[-_ ]?roll", re.IGNORECASE)   # "B-roll", "broll", "b roll", "b_roll"
 
 
 def item_key(d: dict) -> str:
@@ -35,12 +34,12 @@ def _overlaps(a: dict, b: dict) -> bool:
 def _broll_tracks(plan: dict) -> set[int]:
     """Video track indexes whose name says b-roll."""
     tracks = (plan.get("tracks") or {}).get("video") or []
-    return {t["index"] for t in tracks if _BROLL_TRACK.search(t.get("name") or "")}
+    return {t["index"] for t in tracks if _BROLL.search(t.get("name") or "")}
 
 
 def _broll_file(it: dict) -> bool:
     names = [it.get("clip") or "", (it.get("path") or "").rsplit("/", 1)[-1]]
-    return any(_BROLL_FILE.search(n) for n in names)
+    return any(_BROLL.search(n) for n in names)
 
 
 def on_camera(plan: dict) -> list[dict]:
@@ -48,8 +47,9 @@ def on_camera(plan: dict) -> list[dict]:
 
     A video-only item counts when an overlapping audio or `both` item has a
     matching shot prefix (token sets intersect) or the same path. B-roll by name
-    never counts: a file whose name contains "broll" or "b-roll", or a video-only
-    item on a track whose name contains "b-roll", "broll" or "b roll".
+    never counts: a file whose name contains "broll", "b-roll", "b_roll" or "b roll",
+    or a video-only item on a track named that way (a reclassify to on_camera in the
+    decisions still brings such an item back).
     """
     items = plan.get("items", [])
     sound = [i for i in items if i.get("media") in ("audio", "both")]

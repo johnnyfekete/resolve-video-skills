@@ -28,7 +28,8 @@ RESTING = 0.93         # a hand box reaching this far down rests at the source's
 # 2: hands resting at the source's bottom edge no longer set the extent's bottom.
 # 3: the resting threshold moved from 0.98 to 0.93 of the source height.
 # 4: `extent_all`, the extent with resting hands counted (for setups marked bottom_hands: gesture).
-MEASURE_VERSION = 4
+# 5: the resting filter applies to hand boxes only; head bottoms always count.
+MEASURE_VERSION = 5
 
 
 # ---------------------------------------------------------------- summaries (pure)
@@ -94,12 +95,12 @@ def summarize(frames: list[dict]) -> dict:
     face_h = statistics.median(f["face"][3] - f["face"][1] for f in seen)
 
     heads = [f["head"] for f in seen if f.get("head")]
-    boxes = list(heads)
-    for f in frames:
-        boxes.extend(_speaker_hands(f))
+    hands = [h for f in frames for h in _speaker_hands(f)]
+    boxes = heads + hands
     extent = extent_all = None
     if boxes:
-        low = [b[3] for b in boxes if b[3] < RESTING] or [b[3] for b in heads] or [b[3] for b in boxes]
+        low = [b[3] for b in heads] + [b[3] for b in hands if b[3] < RESTING]
+        low = low or [b[3] for b in boxes]
         extent = [_percentile([b[0] for b in boxes], EXTENT_LOW),
                   _percentile([b[1] for b in boxes], EXTENT_LOW),
                   _percentile([b[2] for b in boxes], EXTENT_HIGH),

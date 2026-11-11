@@ -62,6 +62,13 @@ class SummarizeTest(unittest.TestCase):
         s = summarize([frame(hands=rest, joints=wrists) for _ in range(20)])
         self.assertEqual([round(v, 6) for v in s["extent"]], [0.20, HEAD[1], 0.80, HEAD[3]])
 
+    def test_head_bottom_always_counts_in_a_close_up(self):
+        head = [0.30, 0.10, 0.70, 0.95]   # chin at 0.95: never cut the head
+        hand = (0.10, 0.55, 0.20, 0.70)
+        near = {"neck": [0.5, 0.97], "left_wrist": [0.15, 0.68]}
+        s = summarize([frame(head=head, hands=[hand], joints=near) for _ in range(20)])
+        self.assertGreaterEqual(s["extent"][3], 0.95)
+
     def test_extent_all_keeps_hands_at_the_bottom(self):
         rest = [(0.20, 0.85, 0.30, 0.99)]
         wrists = {"neck": [0.5, 0.6], "left_wrist": [0.25, 0.88]}
