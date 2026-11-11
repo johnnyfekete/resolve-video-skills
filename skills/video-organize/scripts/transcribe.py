@@ -47,11 +47,11 @@ def default_runner(slices: list[dict]) -> list[dict]:
     else:
         if not shutil.which("uv"):
             raise RuntimeError("Transcription needs uv (https://docs.astral.sh/uv/) or RVS_TRANSCRIBE_CMD.")
-        base = ["uv", "run", "--quiet", "--with", "mlx-whisper", "python", "-I", str(WORKER)]
+        base = ["uv", "run", "--quiet", "--no-project", "--with", "mlx-whisper", "python", "-I", str(WORKER)]
     with tempfile.TemporaryDirectory() as d:
         src, dst = os.path.join(d, "in.json"), os.path.join(d, "out.json")
         Path(src).write_text(json.dumps(slices))
-        subprocess.run(base + [src, dst], check=True)
+        subprocess.run(base + [src, dst], check=True, cwd=d)
         return json.loads(Path(dst).read_text())
 
 
@@ -69,7 +69,8 @@ def transcribe(path: str, cache_dir: Path, *, stream: int = 0,
     if cache.exists():
         try:
             cached = json.loads(cache.read_text())
-            if cached.get("size") == st.st_size and cached.get("mtime") == st.st_mtime:
+            if cached.get("size") == st.st_size and cached.get("mtime") == st.st_mtime \
+                    and cached.get("stream") == stream:
                 return cached
         except (ValueError, OSError):
             pass
@@ -85,8 +86,13 @@ def transcribe(path: str, cache_dir: Path, *, stream: int = 0,
             _extract(path, a, b, stream, wav)
             jobs.append({"index": i, "wav": wav, "start": a, "end": b})
         results = (runner or default_runner)(jobs)
+    by_index = {r["index"]: r for r in results}
+    missing = [j["index"] for j in jobs if j["index"] not in by_index]
+    if missing:
+        raise RuntimeError(f"Transcription runner returned no result for slice(s) {missing}")
     words, segments, langs = [], [], []
-    for job, res in zip(jobs, results):
+    for job in jobs:
+        res = by_index[job["index"]]
         off = job["start"]
         lang = res.get("language")
         langs.append(lang)
@@ -97,7 +103,7 @@ def transcribe(path: str, cache_dir: Path, *, stream: int = 0,
             segments.append({"text": s["text"], "start": round(off + s["start"], 3),
                              "end": round(off + s["end"], 3), "language": lang})
     known = [x for x in langs if x]
-    out = {"file": path, "size": st.st_size, "mtime": st.st_mtime, "duration": duration,
+    out = {"file": path, "size": st.st_size, "mtime": st.st_mtime, "stream": stream, "duration": duration,
            "language": collections.Counter(known).most_common(1)[0][0] if known else None,
            "words": words, "segments": segments}
     if len(streams) > 1 and _live_streams(path, streams) > 1:

@@ -3,6 +3,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -100,6 +101,44 @@ class TranscribeTest(unittest.TestCase):
         self.assertGreaterEqual(n, 4)
         self.assertEqual(len(res["words"]), n)
         self.assertEqual({w["w"] for w in res["words"]}, {"hi"})
+
+    def test_missing_slice_result_raises(self):
+        def drop_one(slices):
+            return self.echo()(slices)[:-1]
+        with self.assertRaises(RuntimeError):
+            transcribe.transcribe(self.wav, self.cache, runner=drop_one)
+        self.assertFalse(list(self.cache.glob("*.json")) if self.cache.exists() else [])
+
+    def test_out_of_order_results_are_matched_by_index(self):
+        cuts = rvs_audio.silence_cuts(self.wav)
+        res = transcribe.transcribe(self.wav, self.cache, runner=lambda s: self.echo()(s)[::-1])
+        self.assertAlmostEqual(res["words"][1]["start"], cuts[1][0] + 1.0, places=2)
+
+    def test_cache_respects_stream(self):
+        out = str(self.dir / "two2.mkv")
+        ff("-f", "lavfi", "-i", "sine=f=440:d=5", "-f", "lavfi", "-i", "sine=f=880:d=5",
+           "-map", "0:a", "-map", "1:a", "-ac", "2", out)
+        calls = []
+        transcribe.transcribe(out, self.cache, stream=0, runner=self.echo(calls))
+        transcribe.transcribe(out, self.cache, stream=1, runner=self.echo(calls))
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(transcribe.transcribe(out, self.cache, stream=1, runner=self.echo(calls))["stream"], 1)
+        self.assertEqual(len(calls), 2)
+
+    def test_default_runner_isolated_from_caller_project(self):
+        seen = {}
+
+        def fake_run(cmd, **kw):
+            seen["cmd"], seen["cwd"] = cmd, kw.get("cwd")
+            Path(cmd[-1]).write_text("[]")
+        env = {k: v for k, v in os.environ.items() if k != "RVS_TRANSCRIBE_CMD"}
+        with mock.patch.dict(os.environ, env, clear=True), \
+                mock.patch.object(transcribe.shutil, "which", return_value="/usr/bin/uv"), \
+                mock.patch.object(transcribe.subprocess, "run", fake_run):
+            transcribe.default_runner([])
+        self.assertIn("--no-project", seen["cmd"])
+        self.assertIsNotNone(seen["cwd"])
+        self.assertNotEqual(os.path.realpath(seen["cwd"]), os.path.realpath(os.getcwd()))
 
     def test_multiple_streams_warn(self):
         out = str(self.dir / "two.mkv")
