@@ -5,14 +5,20 @@ this module extracts and measures the frames and validates/stores what the agent
 """
 from __future__ import annotations
 
+import bisect
+import hashlib
 import json
 import re
+import shutil
 import statistics
 import subprocess
 import tempfile
 from pathlib import Path
 
 LUMA_MIN, LUMA_MAX = 16.0, 235.0
+# Frames whose camera shake (mean abs difference to the next native frame, 0-255) is above this are
+# excluded from best moments. Measured: still 0.0, testsrc ~1, rotating/handheld-like ~30.
+MAX_MOTION = 10.0
 _PTS = re.compile(r"pts_time:([0-9.]+)")
 _YAVG = re.compile(r"lavfi\.signalstats\.YAVG=([0-9.]+)")
 
@@ -34,43 +40,86 @@ def _read_yavg(path: Path, every: float) -> dict[int, float]:
     return out
 
 
+def _read_pts_yavg(path: Path) -> list[tuple[float, float]]:
+    """Parse `metadata=print` output into [(pts_time, YAVG)] in stream order."""
+    out, pts = [], None
+    if not path.exists():
+        return out
+    for line in path.read_text().splitlines():
+        m = _PTS.search(line)
+        if m:
+            pts = float(m.group(1))
+            continue
+        m = _YAVG.search(line)
+        if m and pts is not None:
+            out.append((pts, float(m.group(1))))
+            pts = None
+    return out
+
+
+def _shake(path: str, times: list[float], td: Path) -> list[float]:
+    """Camera shake at each sample time: mean absolute difference (0-255) between the sample frame and the
+    very next native frame. Needs a second, low-resolution pass over the native frames."""
+    f = td / "native.txt"
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", path, "-vf",
+                    "scale=160:-2,tblend=all_mode=difference,signalstats,"
+                    f"metadata=print:key=lavfi.signalstats.YAVG:file={f}", "-an", "-f", "null", "-"],
+                   check=True, capture_output=True, text=True)
+    native = _read_pts_yavg(f)  # entry j = |frame j - frame j-1| at frame j's pts (first frame has none)
+    if not native:
+        return [0.0] * len(times)
+    stamps = [p for p, _ in native]
+    out = []
+    for t in times:
+        j = min(bisect.bisect_left(stamps, t), len(stamps) - 1)  # first diff entry at or after the sample
+        if abs(stamps[j] - t) > 1e-6 and j > 0 and abs(stamps[j - 1] - t) < abs(stamps[j] - t):
+            j -= 1
+        # `native[j]` is the frame nearest the sample (diff against its predecessor); the next one is j+1
+        out.append(native[j + 1][1] if j + 1 < len(native) else 0.0)
+    return out
+
+
 def extract_frames(path: str, out_dir: Path, every: float = 2.0) -> list[dict]:
-    """One ffmpeg pass: a 640 px JPEG every `every` s plus luma, sharpness (mean edge strength) and motion."""
-    out_dir = Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
+    """A 640 px JPEG every `every` s with luma, sharpness (mean edge strength) and motion (camera shake).
+
+    Frames go to their own subdirectory of `out_dir` (named from a hash of the file's full path), which is
+    cleared first, so other files and earlier runs never leak in."""
+    key_dir = hashlib.sha1(str(Path(path).resolve()).encode()).hexdigest()[:8]
     stem = re.sub(r"[^A-Za-z0-9_.-]", "_", Path(path).stem)
+    frame_dir = Path(out_dir) / f"{stem}_{key_dir}"
+    if frame_dir.exists():
+        shutil.rmtree(frame_dir)
+    frame_dir.mkdir(parents=True)
     with tempfile.TemporaryDirectory() as td:
-        luma_f, edge_f, motion_f = (Path(td) / n for n in ("l.txt", "e.txt", "m.txt"))
+        luma_f, edge_f = (Path(td) / n for n in ("l.txt", "e.txt"))
         key = "metadata=print:key=lavfi.signalstats.YAVG:file="
-        graph = (f"[0:v]fps=1/{every},scale=640:-2,split=3[a][b][c];"
+        graph = (f"[0:v]fps=1/{every},scale=640:-2,split=2[a][b];"
                  f"[b]edgedetect,signalstats,{key}{edge_f},nullsink;"
-                 f"[c]tblend=all_mode=difference,signalstats,{key}{motion_f},nullsink;"
                  f"[a]signalstats,{key}{luma_f}[o]")
         subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", path, "-filter_complex", graph, "-map", "[o]",
-                        "-an", "-start_number", "0", "-q:v", "3", str(out_dir / f"{stem}_%04d.jpg")],
+                        "-an", "-start_number", "0", "-q:v", "3", str(frame_dir / "%04d.jpg")],
                        check=True, capture_output=True, text=True)
-        luma, edge, motion = (_read_yavg(f, every) for f in (luma_f, edge_f, motion_f))
+        luma, edge = (_read_yavg(f, every) for f in (luma_f, edge_f))
+        emitted = sorted(int(p.stem) for p in frame_dir.glob("*.jpg"))
+        motion = _shake(path, [i * every for i in emitted], Path(td))
     frames = []
-    for i in range(10**6):
-        img = out_dir / f"{stem}_{i:04d}.jpg"
-        if not img.exists():
-            break
+    for i, mo in zip(emitted, motion):
         t = i * every
-        frames.append({"t": int(t) if float(t).is_integer() else t, "image": str(img),
+        frames.append({"t": int(t) if float(t).is_integer() else t, "image": str(frame_dir / f"{i:04d}.jpg"),
                        "sharpness": round(edge.get(i, 0.0), 3), "luma": round(luma.get(i, 0.0), 3),
-                       "motion": round(motion.get(i, 0.0), 3)})
+                       "motion": round(mo, 3)})
     return frames
 
 
 def best_moments(frames: list[dict], min_len: float = 3.0) -> list[dict]:
-    """Runs of well-exposed, sharper-than-median frames, longest and best first."""
+    """Runs of well-exposed, steady, sharper-than-median frames, longest and best first."""
     if not frames:
         return []
     median = statistics.median(f["sharpness"] for f in frames)
     top = max(f["sharpness"] for f in frames) or 1.0
     step = frames[1]["t"] - frames[0]["t"] if len(frames) > 1 else 2.0
     good = [LUMA_MIN <= f["luma"] <= LUMA_MAX and f["sharpness"] >= median and f["sharpness"] > 0
-            for f in frames]
+            and f["motion"] <= MAX_MOTION for f in frames]
     runs, i = [], 0
     while i < len(frames):
         if not good[i]:
@@ -84,7 +133,9 @@ def best_moments(frames: list[dict], min_len: float = 3.0) -> list[dict]:
         if end - start >= min_len:
             sharp = sum(f["sharpness"] for f in run) / len(run) / top
             expo = sum(1 - abs(f["luma"] - 125.5) / 109.5 for f in run) / len(run)
-            runs.append({"start": start, "end": end, "score": round(100 * (0.6 * sharp + 0.4 * expo), 1)})
+            steady = 1 - sum(f["motion"] for f in run) / len(run) / MAX_MOTION
+            runs.append({"start": start, "end": end,
+                         "score": round(100 * (0.6 * sharp + 0.4 * expo) * steady, 1)})
         i = j + 1
     return sorted(runs, key=lambda r: (-(r["end"] - r["start"]), -r["score"]))
 

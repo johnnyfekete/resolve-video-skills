@@ -83,6 +83,61 @@ class BrollTest(unittest.TestCase):
         self.assertEqual(entry["frames"], {"0": "desk", "2": "hands"})
         self.assertEqual(len(entry["matches"]), 1)
 
+    def test_rerun_with_larger_interval_has_no_stale_frames(self):
+        clip = str(self.dir / "a.mp4")
+        make_clip(clip)
+        out = self.dir / "frames"
+        self.assertEqual(len(broll.extract_frames(clip, out)), 5)
+        frames = broll.extract_frames(clip, out, every=5.0)
+        self.assertEqual([f["t"] for f in frames], [0, 5])
+        self.assertEqual(len(list(out.rglob("*.jpg"))), 2)
+
+    def test_same_stem_files_do_not_mix(self):
+        a, b = str(self.dir / "a.mov"), str(self.dir / "a.mp4")
+        make_clip(a, total=10)
+        make_clip(b, total=4)
+        out = self.dir / "frames"
+        fa = broll.extract_frames(a, out)
+        fb = broll.extract_frames(b, out)
+        self.assertEqual(len(fa), 5)
+        self.assertEqual(len(fb), 2)
+        self.assertTrue({f["image"] for f in fa}.isdisjoint(f["image"] for f in fb))
+
+    def test_shake_measured_against_next_frame(self):
+        still, moving = str(self.dir / "s.mp4"), str(self.dir / "m.mp4")
+        ff("-f", "lavfi", "-i", "color=gray:s=320x240:r=10:d=6", "-pix_fmt", "yuv420p", still)
+        ff("-f", "lavfi", "-i", "testsrc2=s=320x240:r=10:d=6", "-vf", "rotate=t*3:fillcolor=gray",
+           "-pix_fmt", "yuv420p", moving)
+        ms = [f["motion"] for f in broll.extract_frames(still, self.dir / "f1")]
+        mm = [f["motion"] for f in broll.extract_frames(moving, self.dir / "f2")]
+        self.assertLess(max(ms), 0.5)
+        self.assertGreater(min(mm[:-1]), 5 * max(ms) + 5)
+
+
+def frame(t, sharp=10.0, luma=120.0, motion=0.0):
+    return {"t": t, "image": "x.jpg", "sharpness": sharp, "luma": luma, "motion": motion}
+
+
+class BestMomentsTest(unittest.TestCase):
+    def test_shaky_run_excluded_or_lower(self):
+        steady = [frame(t) for t in (0, 2, 4)]
+        mild = [frame(t, motion=broll.MAX_MOTION / 2) for t in (0, 2, 4)]
+        self.assertGreater(broll.best_moments(steady)[0]["score"], broll.best_moments(mild)[0]["score"])
+        shaky = [frame(t, motion=broll.MAX_MOTION + 1) for t in (0, 2, 4)]
+        self.assertEqual(broll.best_moments(shaky), [])
+
+    def test_blurry_frames_excluded(self):
+        frames = [frame(0, sharp=1), frame(2, sharp=1), frame(4), frame(6), frame(8)]
+        m = broll.best_moments(frames)
+        self.assertEqual((m[0]["start"], m[0]["end"]), (4, 10))
+
+    def test_min_len_cutoff(self):
+        frames = [frame(0), frame(2, sharp=1), frame(4, sharp=1), frame(6), frame(8), frame(10, sharp=1)]
+        # runs: [0,2) is 2 s (too short), [6,10) is 4 s
+        m = broll.best_moments(frames)
+        self.assertEqual([(r["start"], r["end"]) for r in m], [(6, 10)])
+        self.assertEqual(len(broll.best_moments(frames, min_len=2.0)), 2)
+
 
 if __name__ == "__main__":
     unittest.main()
