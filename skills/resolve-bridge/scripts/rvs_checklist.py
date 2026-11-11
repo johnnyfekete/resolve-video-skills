@@ -16,7 +16,7 @@ NOTES_END = "<!-- notes:end -->"
 
 # The full pipeline, in order: (step name used in history, skill, what it does)
 PIPELINE = [
-    ("ingest", "video-ingest", "Transcribe raw clips, match them to the script, catalogue b-roll"),
+    ("organize", "video-organize", "Transcribe recordings, find and score takes, catalogue b-roll"),
     ("assemble", "video-assemble", "First cut: best take per line, b-roll placed"),
     ("broll", "video-assemble", "B-roll placed over the matching lines"),
     ("tighten", "video-tighten", "Natural cut edges, shorter pauses"),
@@ -29,6 +29,9 @@ PIPELINE = [
     ("deliver", "video-deliver", "Render, chapters, description"),
     ("shorts", "video-shorts", "Vertical clips for social media"),
 ]
+
+# Old step names that still count as the step that replaced them (in history and skipped)
+ALIASES = {"ingest": "organize"}
 
 _TICK = re.compile(r"^\s*-\s*\[[xX]\]\s*\*\*(I\d+)\*\*")
 
@@ -46,8 +49,8 @@ def read_back(path: Path) -> tuple[set[str], str | None]:
 
 
 def next_step(state: dict) -> tuple | None:
-    done = {h["step"] for h in state.get("history", [])}
-    skipped = set(state.get("skipped", {}))
+    done = {ALIASES.get(h["step"], h["step"]) for h in state.get("history", [])}
+    skipped = {ALIASES.get(k, k) for k in state.get("skipped", {})}
     return next((p for p in PIPELINE if p[0] not in done and p[0] not in skipped), None)
 
 
@@ -55,18 +58,23 @@ def render(state: dict, notes: str | None, now: str) -> str:
     cur = state.get("current", {})
     hist = state.get("history", [])
     issues = state.get("issues", [])
-    skipped = state.get("skipped", {})
+    skipped = {ALIASES.get(k, k): v for k, v in state.get("skipped", {}).items()}
     last_by_step = {}
     for h in hist:
-        last_by_step[h["step"]] = h
+        last_by_step[ALIASES.get(h["step"], h["step"])] = h
     pending = state.get("pending")
     nxt = next_step(state)
     open_issues = [i for i in issues if i["status"] == "open"]
     done_issues = [i for i in issues if i["status"] != "open"]
 
-    L = [f"# Edit checklist: {state.get('base_name', '')}", "",
-         f"Resolve project **{state.get('resolve_project', '')}** · current timeline "
-         f"**v{cur.get('version', 0):02d} {cur.get('timeline', '')}** · updated {now[:16].replace('T', ' ')}",
+    if cur.get("timeline") is None and not hist:
+        where = f"no timeline tracked yet · updated {now[:16].replace('T', ' ')}"
+        if state.get("resolve_project"):
+            where = f"Resolve project **{state['resolve_project']}** · " + where
+    else:
+        where = (f"Resolve project **{state.get('resolve_project', '')}** · current timeline "
+                 f"**v{cur.get('version', 0):02d} {cur.get('timeline', '')}** · updated {now[:16].replace('T', ' ')}")
+    L = [f"# Edit checklist: {state.get('base_name', '')}", "", where,
          "", "_This file is regenerated after every step. Tick an issue's box to close it. "
          "Write anything you like in **Your notes**; it is kept._", ""]
 

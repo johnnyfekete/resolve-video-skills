@@ -34,7 +34,7 @@ python3 scripts/rvs.py --workdir <folder> status
 
 `EDIT_CHECKLIST.md` in the working folder is what the user reads. Point them to it at the end of every step.
 
-- **Pipeline**: ingest, assemble, broll, tighten, framing, color, sound, graphics, captions, qc, deliver, shorts. A step is done when the history has an entry with that step name. Steps the video does not need: `skip <step> --reason "..."` (undo with `unskip`).
+- **Pipeline**: organize, assemble, broll, tighten, framing, color, sound, graphics, captions, qc, deliver, shorts. A step is done when the history has an entry with that step name. Steps the video does not need: `skip <step> --reason "..."` (undo with `unskip`).
 - **Needs attention (issues)**: things a person has to check, decide, film or fix. Skills add them with `s.add_issue(step, text, where)`; you can too (`issue add "text" --step framing --where "S08 at 00:57"`). The user closes one by ticking its box in the file (read back on the next run) or with `issue resolve I3 --note "..."`.
 - **Your notes**: free text between the notes markers. Never overwritten.
 
@@ -76,6 +76,7 @@ Build refuses to run if there are unrecorded hand edits, so a plan made from an 
 | `build PLAN --step STEP --summary S` | Build workflow |
 | `checklist` | Regenerate `EDIT_CHECKLIST.md` |
 | `issue add TEXT [--step S] [--where W]` / `issue resolve ID [--note N]` / `issue list` | Things a person must check |
+| `init [--base NAME]` | Start an empty state before any timeline exists (no Resolve needed); issues and skips work, `adopt` later records v01 |
 | `skip STEP [--reason R]` / `unskip STEP` | Mark a pipeline step as not needed |
 
 ## Rules for skills that use this

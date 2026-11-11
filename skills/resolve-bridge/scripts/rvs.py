@@ -350,7 +350,8 @@ class Session:
             self._pull_checklist()
         if connect_now:
             self.resolve, self.project = connect()
-            if self.state and self.state["resolve_project"] != self.project.GetName():
+            if self.state and self.state["resolve_project"] is not None \
+                    and self.state["resolve_project"] != self.project.GetName():
                 raise RvsError(f"Resolve has project '{self.project.GetName()}' open, but this folder's state "
                                f"belongs to '{self.state['resolve_project']}'. Open that project first.")
 
@@ -358,6 +359,18 @@ class Session:
     def _require_state(self):
         if not self.state:
             raise RvsError(f"No edit state in {self.dir}. Run: rvs.py adopt --timeline '<name>'")
+
+    def init_state(self, base_name: str | None = None) -> dict:
+        """Create an empty state (no timeline yet) so issues can be recorded before the first cut exists.
+        Returns the existing state unchanged if there is one."""
+        if self.state:
+            return self.state
+        self.state = {"schema": STATE_SCHEMA, "resolve_project": None,
+                      "base_name": base_name or self.workdir.name, "archive_folder": "Archive",
+                      "history": [], "current": {"version": 0, "timeline": None, "plan": None},
+                      "issues": [], "skipped": {}}
+        self._save_state()
+        return self.state
 
     def _save_state(self):
         self.dir.mkdir(parents=True, exist_ok=True)
@@ -408,6 +421,7 @@ class Session:
 
     def skip_step(self, step: str, reason: str = ""):
         self._require_state()
+        step = rvs_checklist.ALIASES.get(step, step)
         names = [p[0] for p in rvs_checklist.PIPELINE]
         if step not in names:
             raise RvsError(f"Unknown step '{step}'. Steps: {', '.join(names)}")
@@ -433,6 +447,8 @@ class Session:
     def current_timeline(self):
         self._require_state()
         name = self.state["current"]["timeline"]
+        if name is None:
+            raise RvsError("No timeline tracked yet.")
         tl = find_timeline(self.project, name)
         if tl is None:
             raise RvsError(f"Timeline '{name}' from the state file is not in the project (renamed or deleted?). "
@@ -499,12 +515,16 @@ class Session:
                           "current": {"version": 0}}
         else:
             self.state["base_name"] = base_name
+            self.state["resolve_project"] = self.project.GetName()
         entry = self._record("adopt", name, plan, f"started from existing timeline '{name}'", "adopt")
         self._save_state()
         return entry, plan
 
     def check(self) -> list[str]:
         """Differences between the current Resolve timeline and the last recorded plan."""
+        self._require_state()
+        if self.state["current"].get("timeline") is None:
+            raise RvsError("No timeline tracked yet.")
         tl = self.current_timeline()
         return diff_plans(self.load_plan(), export_plan(tl))
 
@@ -727,8 +747,11 @@ def _print_status(s: Session):
         print(f"No edit state in {s.dir}.")
         print("Next: python3 rvs.py adopt --timeline '<timeline to start from>'")
         return
-    print(f"Resolve project: {st['resolve_project']}")
-    print(f"Current: v{st['current']['version']:02d}  {st['current']['timeline']}")
+    print(f"Resolve project: {st['resolve_project'] or '(not set yet)'}")
+    if st["current"].get("timeline") is None:
+        print("Current: no timeline tracked yet")
+    else:
+        print(f"Current: v{st['current']['version']:02d}  {st['current']['timeline']}")
     print("History:")
     for h in st["history"]:
         print(f"  v{h['version']:02d}  {h['date'][:16]}  {h['step']:<10} {h['timeline']}  - {h['summary']}")
@@ -742,7 +765,7 @@ def _print_status(s: Session):
     nxt = rvs_checklist.next_step(st)
     print(f"Next step: {nxt[0]} ({nxt[1]})" if nxt else "Next step: none, pipeline complete")
     print(f"Checklist: {s.checklist_path}")
-    if s.project:
+    if s.project and st["current"].get("timeline") is not None:
         changes = s.check()
         print(f"Hand edits since last step: {len(changes)}" + (" (run: rvs.py sync)" if changes else ""))
 
@@ -757,6 +780,8 @@ def main(argv=None):
     a.add_argument("--timeline", help="timeline name (default: the one open in Resolve)")
     a.add_argument("--base", help="base name for new versions (default: timeline name without _vNN...)")
     a.add_argument("--archive-folder", default="Archive", help="media pool folder for old versions ('' = off)")
+    ini = sub.add_parser("init", help="start an empty state before any timeline exists (no Resolve needed)")
+    ini.add_argument("--base", help="base name for new versions (default: the folder name)")
     sub.add_parser("check", help="list hand edits on the current timeline since the last step (exit 1 if any)")
     sy = sub.add_parser("sync", help="record hand edits as their own history entry")
     sy.add_argument("--summary", default="hand edits in Resolve")
@@ -791,8 +816,12 @@ def main(argv=None):
     args = ap.parse_args(argv)
 
     try:
-        s = Session(args.workdir)
-        if args.cmd == "status":
+        s = Session(args.workdir, connect_now=args.cmd != "init")
+        if args.cmd == "init":
+            existed = bool(s.state)
+            s.init_state(args.base)
+            print(f"state already exists: {s.state_path}" if existed else f"state created: {s.state_path}")
+        elif args.cmd == "status":
             _print_status(s)
         elif args.cmd == "adopt":
             entry, plan = s.adopt(args.timeline, args.base, args.archive_folder)
