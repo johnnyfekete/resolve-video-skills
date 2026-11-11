@@ -167,6 +167,25 @@ class OutlierTest(Base):
         self.assertEqual(res["outliers"], {"k4"})
         self.assertEqual(four["outliers"], set())
 
+    def test_two_items_the_looser_one_is_the_outlier(self):
+        normal = (0.36, 0.17, 0.68, 0.80)
+        meas = {"a": m(eyes=(0.52, 0.30), extent=normal),
+                "b": m(eyes=(0.52, 0.30), extent=(0.22, 0.01, 0.84, 0.80))}
+        res = self.solve(meas)
+        alone = self.solve({"a": meas["a"]})
+        self.assertEqual(res["outliers"], {"b"})
+        self.assertAlmostEqual(res["rect"].w, alone["rect"].w, places=6)
+        self.assertEqual(res["items"]["a"], res["rect"])
+        self.assertGreater(res["items"]["b"].w, res["rect"].w)
+        self.assertIn("outlier", " ".join(f["text"] for f in res["flags"] if f["key"] == "b"))
+
+    def test_two_similar_items_share_one_frame(self):
+        meas = {"a": m(eyes=(0.52, 0.30), extent=(0.36, 0.17, 0.68, 0.80)),
+                "b": m(eyes=(0.52, 0.30), extent=(0.35, 0.17, 0.69, 0.81))}
+        res = self.solve(meas)
+        self.assertEqual(res["outliers"], set())
+        self.assertEqual(res["items"]["a"], res["items"]["b"])
+
 
 class CompositionTest(Base):
     def test_tall_head_keeps_margin_above_head_top(self):

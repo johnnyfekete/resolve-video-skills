@@ -463,8 +463,18 @@ def solve_base(setup_items: list[str], measures: dict, decision: dict, budget: f
         return _group([measures[k] for k in keys])
 
     # Outliers: an item that loosens the setup by more than opts.outlier gets its own frame.
-    # Leave-one-out needs at least 3 strong items, and fewer than half of them may become outliers.
+    # With 3 or more strong items: leave-one-out, and fewer than half of them may become outliers.
+    # With exactly 2: the one that needs a frame looser than the other by more than opts.outlier is
+    # the outlier, and the setup frame is sized from the other.
     remaining, outliers = list(strong), []
+    if len(strong) == 2:
+        a, b = strong
+        wa, wb = (_base_w(group([k]), floor, opts) for k in strong)
+        loose, tight = (a, b) if wa >= wb else (b, a)
+        ratio = _base_w(group(strong), floor, opts) / min(wa, wb)
+        if max(wa, wb) / min(wa, wb) > opts.outlier + EPS:
+            remaining.remove(loose)
+            outliers.append((loose, ratio))
     while len(remaining) - 1 > len(strong) / 2:
         w_all = _base_w(group(remaining), floor, opts)
         ratios = {k: w_all / _base_w(group([j for j in remaining if j != k]), floor, opts)

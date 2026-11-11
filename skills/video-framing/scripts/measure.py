@@ -23,10 +23,11 @@ HDR_TRANSFERS = ("arib-std-b67", "smpte2084")
 EXTENT_LOW, EXTENT_HIGH = 2.0, 98.0
 HAND_WRIST_MAX = 0.2   # a hand box centre this close to a body-pose wrist belongs to the speaker
 HAND_FACE_MAX = 0.5    # without wrists: a hand this close to the face belongs to the speaker
-RESTING = 0.98         # a hand box reaching this far down rests at the source's bottom edge
+RESTING = 0.93         # a hand box reaching this far down rests at the source's bottom edge
 # Part of every cache key. Bump it whenever face_probe.swift or summarize changes what is measured.
 # 2: hands resting at the source's bottom edge no longer set the extent's bottom.
-MEASURE_VERSION = 2
+# 3: the resting threshold moved from 0.98 to 0.93 of the source height.
+MEASURE_VERSION = 3
 
 
 # ---------------------------------------------------------------- summaries (pure)
