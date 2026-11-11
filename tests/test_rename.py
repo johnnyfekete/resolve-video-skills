@@ -19,8 +19,8 @@ import store  # noqa: E402
 
 
 class FakeClip:
-    def __init__(self, path, replace_ok=True):
-        self.props = {"File Path": path, "Clip Name": Path(path).name, "Type": "Video"}
+    def __init__(self, path, replace_ok=True, ctype="Video", name=None):
+        self.props = {"File Path": path, "Clip Name": name or Path(path).name, "Type": ctype}
         self.replaced = []
         self.replace_ok = replace_ok
 
@@ -94,7 +94,7 @@ def take(file, tid, start=0.0):
     return {"id": tid, "scene": scene, "file": str(file), "start": start, "end": start + 5, "status": "complete"}
 
 
-class RenameTest(unittest.TestCase):
+class Base(unittest.TestCase):
     def setUp(self):
         td = tempfile.TemporaryDirectory()
         self.addCleanup(td.cleanup)
@@ -112,6 +112,8 @@ class RenameTest(unittest.TestCase):
     def names(self, data, **kw):
         return {Path(r["old"]).name: Path(r["new"]).name for r in rename.propose(data, [], **kw)}
 
+
+class RenameTest(Base):
     def test_names_follow_table(self):
         a, b, c, d, e = (self.file(n) for n in ("IMG_1.MOV", "IMG_2.MOV", "IMG_3.MOV", "IMG_4.MOV", "IMG_5.MOV"))
         data = {"takes": [
@@ -183,7 +185,7 @@ class RenameTest(unittest.TestCase):
         rename.apply(rows, self.work, never_imported=True)
         new = self.footage / "S01A_T01_My Clip é.MOV"
         self.assertTrue(new.exists() and not a.exists())
-        self.assertEqual(rename.undo(self.work), 1)
+        self.assertEqual(rename.undo(self.work, never_imported=True), 1)
         self.assertTrue(a.exists() and not new.exists())
 
     def test_undo_restores(self):
@@ -216,14 +218,14 @@ class RenameTest(unittest.TestCase):
         self.assertEqual(json.loads(plan.read_text())["items"][0]["path"], new)
         self.assertEqual(json.loads(old_plan.read_text())["items"][0]["path"], str(a))
 
-        rename.undo(self.work)
+        rename.undo(self.work, never_imported=True)
         self.assertTrue(a.exists())
         self.assertEqual(store.load(org)["takes"][0]["file"], str(a))
         self.assertIn(str(a), json.loads((org / "broll.json").read_text()))
         self.assertEqual(json.loads(plan.read_text())["items"][0]["path"], str(a))
         self.assertTrue((cache / (hashlib.sha1(str(a).encode()).hexdigest() + ".json")).exists())
         with self.assertRaises(RuntimeError):
-            rename.undo(self.work)
+            rename.undo(self.work, never_imported=True)
 
     def test_resolve_relink_called(self):
         a, b = self.file("IMG_1.MOV"), self.file("IMG_2.MOV")
@@ -308,9 +310,130 @@ class RenameTest(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertFalse(a.exists())
         self.assertTrue((self.footage / "S02A_T01_IMG_2.MOV").exists())
-        code, out, _ = run("--undo")
+        code, _, err = run("--undo")
+        self.assertEqual(code, 1)
+        self.assertFalse(a.exists())
+        code, out, _ = run("--undo", "--never-imported")
         self.assertEqual(code, 0)
         self.assertTrue(a.exists() and b.exists())
+
+
+class FixRoundTest(Base):
+    def row(self, src, prefix="S01A_T01_"):
+        return {"old": str(src), "new": str(src.with_name(prefix + src.name)), "reason": ""}
+
+    def test_undo_needs_project_or_flag_and_relinks(self):
+        a = self.file("IMG_1.MOV")
+        row = self.row(a)
+        rename.apply([row], self.work, never_imported=True)
+        with self.assertRaises(RuntimeError):
+            rename.undo(self.work)
+        self.assertFalse(a.exists())
+        clip = FakeClip(row["new"])
+        rename.undo(self.work, FakeProject(FakeFolder([clip])))
+        self.assertTrue(a.exists())
+        self.assertEqual(clip.replaced, [str(a)])
+
+    def test_undo_refuses_used_clip(self):
+        a = self.file("IMG_1.MOV")
+        row = self.row(a)
+        rename.apply([row], self.work, never_imported=True)
+        clip = FakeClip(row["new"])
+        project = FakeProject(FakeFolder([clip]), [FakeTimeline(video=[FakeItem(clip)])])
+        with self.assertRaises(RuntimeError):
+            rename.undo(self.work, project)
+        self.assertFalse(a.exists())
+
+    def test_nested_clips_make_every_imported_clip_used(self):
+        a, b = self.file("IMG_1.MOV"), self.file("IMG_2.MOV")
+        project = FakeProject(FakeFolder([FakeClip(str(a)), FakeClip("/x/comp", ctype="Compound Clip")]))
+        used = rename.used_paths(project)
+        self.assertTrue(rename.has_nested(project))
+        data = {"takes": [take(a, "S01A-T01"), take(b, "S02A-T01")]}
+        rows = rename.propose(data, [], used, nested=True)
+        self.assertIn("compound, multicam or Fusion", rows[0]["skip"])
+        self.assertNotIn("skip", rows[1])
+        with self.assertRaises(RuntimeError):
+            rename.apply([self.row(a)], self.work, project)
+
+    def test_target_created_before_rename_aborts_and_rolls_back(self):
+        a, b = self.file("IMG_1.MOV"), self.file("IMG_2.MOV")
+        rows = [self.row(a), self.row(b)]
+        other = self.footage / "s01a_t01_img_2.mov"
+
+        def sneaky(r):
+            other.write_bytes(b"precious")
+            return []
+
+        with mock.patch.object(rename, "validate", sneaky), self.assertRaises(FileExistsError):
+            rename.apply(rows, self.work, never_imported=True)
+        self.assertTrue(a.exists() and b.exists())
+        self.assertEqual(other.read_bytes(), b"precious")
+        self.assertEqual(rename._load_record(self.work)["batches"], [])
+
+    def test_custom_clip_name_kept(self):
+        a, b = self.file("IMG_1.MOV"), self.file("IMG_2.MOV")
+        custom, plain = FakeClip(str(a), name="Hero shot"), FakeClip(str(b))
+        project = FakeProject(FakeFolder([custom, plain]))
+        rename.apply([self.row(a), self.row(b)], self.work, project)
+        self.assertEqual(custom.props["Clip Name"], "Hero shot")
+        self.assertEqual(plain.props["Clip Name"], "S01A_T01_IMG_2.MOV")
+        custom.props["Clip Name"] = "Renamed later"
+        rename.undo(self.work, project)
+        self.assertEqual(custom.props["Clip Name"], "Renamed later")
+        self.assertEqual(plain.props["Clip Name"], "IMG_2.MOV")
+
+    def test_plan_keeps_formatting(self):
+        a = self.file("IMG_1.MOV")
+        plan = self.work / ".edit/plans/v01_x.json"
+        plan.parent.mkdir(parents=True)
+        text = json.dumps({"items": [{"path": str(a), "clip": "é"}]}, indent=1, ensure_ascii=False)
+        plan.write_text(text)
+        (self.work / ".edit/state.json").write_text(json.dumps(
+            {"resolve_project": None, "current": {"plan": "plans/v01_x.json"}}))
+        row = self.row(a)
+        rename.apply([row], self.work, never_imported=True)
+        self.assertEqual(plan.read_text(), text.replace(str(a), row["new"]))
+
+    def test_never_imported_still_checks_used_clips(self):
+        a, b = self.file("IMG_1.MOV"), self.file("IMG_2.MOV")
+        clip = FakeClip(str(a))
+        project = FakeProject(FakeFolder([clip]), [FakeTimeline(video=[FakeItem(clip)])])
+        store.save(self.work / ".edit/organize", {"takes": [take(a, "S01A-T01"), take(b, "S02A-T01")]})
+        out = self.cli(project, "--never-imported")
+        self.assertEqual(out[0], 0)
+        self.assertIn("skipped: used on a timeline", out[1])
+        code, _, _ = self.cli(project, "--apply", "--never-imported")
+        self.assertEqual(code, 0)
+        self.assertTrue(a.exists())
+        self.assertTrue((self.footage / "S02A_T01_IMG_2.MOV").exists())
+
+    def cli(self, project, *args):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), \
+                mock.patch.object(rvs, "connect", return_value=(None, project)):
+            code = organize.main(["--workdir", str(self.work), "rename", *args])
+        return code, out.getvalue(), err.getvalue()
+
+    def test_apply_needs_the_shown_proposal(self):
+        a, b = self.file("IMG_1.MOV"), self.file("IMG_2.MOV")
+        org = self.work / ".edit/organize"
+        store.save(org, {"takes": [take(a, "S01A-T01")]})
+        project = FakeProject(FakeFolder())
+        code, _, err = self.cli(project, "--apply")
+        self.assertEqual(code, 1)
+        self.assertIn("proposal", err)
+        self.assertTrue(a.exists())
+        self.assertEqual(self.cli(project)[0], 0)
+        self.assertTrue((org / "rename-proposal.json").exists())
+        store.save(org, {"takes": [take(a, "S01A-T01"), take(b, "S02A-T01")]})
+        code, _, err = self.cli(project, "--apply")
+        self.assertEqual(code, 1)
+        self.assertIn("changed", err)
+        self.assertTrue(a.exists() and b.exists())
+        self.cli(project)
+        self.assertEqual(self.cli(project, "--apply")[0], 0)
+        self.assertFalse(a.exists() or b.exists())
 
 
 if __name__ == "__main__":

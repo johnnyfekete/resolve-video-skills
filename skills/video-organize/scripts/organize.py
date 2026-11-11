@@ -425,24 +425,38 @@ def _show(rows: list[dict]) -> None:
               else f"  {Path(r['old']).name}  skipped: {r['skip']}")
 
 
+PROPOSAL = "rename-proposal.json"
+
+
 def cmd_rename(workdir: Path, args) -> int:
+    org = _org(workdir)
     if args.undo:
-        count = rename.undo(workdir, _resolve_project(workdir, False))
+        count = rename.undo(workdir, _resolve_project(workdir, not args.never_imported),
+                            never_imported=args.never_imported)
         print(f"Restored {count} file names.")
         return 0
-    data = store.load(_org(workdir))
-    project = None if args.never_imported else _resolve_project(workdir, args.apply)
+    data = store.load(org)
+    project = _resolve_project(workdir, args.apply and not args.never_imported)
     used = rename.used_paths(project) if project is not None else set()
-    rows = rename.propose(data, _scenes(data), used)
+    nested = project is not None and rename.has_nested(project)
+    rows = rename.propose(data, _scenes(data), used, nested)
     todo = rename.active(rows)
     if not args.apply:
-        if project is None and not args.never_imported:
+        org.mkdir(parents=True, exist_ok=True)
+        (org / PROPOSAL).write_text(json.dumps(rows, indent=2, ensure_ascii=False) + "\n")
+        if project is None:
             print("Resolve was not reachable, so clips already on a timeline could not be checked.")
         print(f"{len(todo)} files to rename, {len(rows) - len(todo)} skipped:")
         _show(rows)
         if todo:
             print("Show the user the full list. Apply only on a clear yes: organize.py rename --apply")
         return 0
+    saved = org / PROPOSAL
+    if not saved.exists():
+        raise OrganizeError("No rename proposal has been shown yet. Run: organize.py rename")
+    if json.loads(saved.read_text()) != rows:
+        raise OrganizeError("The rename proposal changed since it was shown (takes or Resolve differ now). "
+                            "Run: organize.py rename, show the user the new list, then apply.")
     if not todo:
         print("Nothing to rename.")
         return 0
@@ -450,6 +464,7 @@ def cmd_rename(workdir: Path, args) -> int:
     if errors:
         raise OrganizeError("Rename blocked, nothing changed:\n  " + "\n  ".join(errors))
     path = rename.apply(rows, workdir, project, never_imported=args.never_imported)
+    saved.unlink()
     print(f"Renamed {len(todo)} files. Undo record: {path}. Undo with: organize.py rename --undo")
     _show(rows)
     return 0
@@ -475,7 +490,7 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("report", help="rewrite TAKES.md")
     p = sub.add_parser("rename", help="propose, apply or undo film-style file names")
     p.add_argument("--apply", action="store_true", help="rename after the user approved the full list")
-    p.add_argument("--never-imported", action="store_true", help="the footage was never imported into Resolve")
+    p.add_argument("--never-imported", action="store_true", help="the footage was never imported into Resolve (Resolve need not be open; if it is, used clips are still skipped)")
     p.add_argument("--undo", action="store_true", help="reverse the last rename")
     args = ap.parse_args(argv)
     workdir = Path(args.workdir).resolve()
