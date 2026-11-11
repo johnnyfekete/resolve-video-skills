@@ -5,7 +5,7 @@ description: Frames a talking-head cut in DaVinci Resolve Studio like a professi
 
 # video-framing
 
-Run this after `video-tighten` (it hides the jump cuts tighten creates) and before `video-color`. Requires the **resolve-bridge** skill installed next to this one (it finds it at `../resolve-bridge`, or set `RVS_BRIDGE`), plus `ffmpeg` and `swift` (macOS ships it; Apple Vision measures faces and hands).
+Run this after `video-tighten` (it hides the jump cuts tighten creates) and before `video-color`. Requires the **resolve-bridge** skill installed next to this one (it finds it at `../resolve-bridge`, or set `RVS_BRIDGE`), plus `ffmpeg`, `ffprobe` and `swift` (macOS ships it; Apple Vision measures faces and hands). The transcript needs `uv` (local Whisper) or a transcriber command in `RVS_TRANSCRIBE_CMD`; if transcription fails, `prepare` continues with a warning and the transcript is incomplete.
 
 Run scripts as `python3 <this skill's folder>/scripts/framing.py <command> --workdir <folder>`. Commands: `prepare`, `solve`, `apply`.
 
@@ -23,15 +23,15 @@ The scripts measure and do the maths. **You make the judgement calls** (what is 
    - `.edit/framing/transcript.md`: `MM:SS.ss-MM:SS.ss <setup> <text>` per spoken segment, in timeline time;
    - `.edit/framing/decisions.json`: a template with every setup empty (a re-run keeps decisions for setups whose items did not change), `context.json` with budgets and stills.
 
-   It prints one line per setup (items, zoom budget, still) and lists items that already carry hand framing: those are left exactly as they are.
+   It prints one line per setup (items, zoom budget, still) and the number of items that already carry hand framing: those are left exactly as they are, and the list is in `context.json` and `REPORT.md`.
 3. **Decide.** Look at every setup still and fill in `decisions.json` (see *How to decide*). Then pick the push-in lines.
-4. **Solve.** A dry run that changes nothing in Resolve:
+4. **Solve.** A dry run that changes nothing in Resolve. It needs a tracked state (a timeline adopted through resolve-bridge) but not a running Resolve; without Resolve it uses the recorded plan:
    ```bash
    python3 scripts/framing.py solve --workdir <folder>
    ```
    Writes `generated/framing/REPORT.md`, `setups/<id>_before_after.jpg` per setup and `flags/<n>.jpg` per flagged item, and `.edit/framing/solution.json`. An invalid `decisions.json` (missing label, box outside 0..1) stops with the reason and exit code 2.
 5. **Check the previews yourself.** Open every before/after image and the flag images. Look for the things the rules forbid: a tangent along the frame edge, a clipped hand, a head too close to the top, clutter still at an edge, a chosen plant cut off. If a frame looks wrong, fix **your own decisions** (move a box, change a label, drop a push-in) and solve again. Repeat until the previews are right or the remaining problems are ones only a person can judge. Read the report's flags and dropped push-ins too.
-6. **Apply.**
+6. **Apply.** Needs Resolve open with the project loaded.
    ```bash
    python3 scripts/framing.py apply --workdir <folder>
    ```
@@ -53,7 +53,7 @@ The scripts measure and do the maths. **You make the judgement calls** (what is 
     },
     "B": {"items": ["..."], "label": "dynamic", "reason": "sitting on the counter, high angle", "keep_out": [], "keep_in": []}
   },
-  "reclassify": {"<item key>": "broll"},
+  "reclassify": {"V1@1234": "broll"},
   "push_ins": [
     {"start_s": 41.2, "end_s": 47.0, "text": "Writing is thinking.",
      "reason": "the thesis, first time it is said plainly"}
@@ -67,7 +67,7 @@ Boxes are `[left, top, right, bottom]`, normalised 0..1 on the setup still (read
 - **Keep-in** boxes: set dressing the speaker chose. Plants, flowers, a vase. The solver keeps them whole.
 - **Label** each setup `plain` or `dynamic`. `plain` is front-on, eye level and static (seated at a table). `dynamic` is a high or low angle, an unusual position (sitting on a counter) or a strong diagonal. Dynamic setups get no push-ins.
 - **Reason**: one line per setup, always. If you are unsure whether something is clutter or chosen, give your best answer and say so there.
-- **Reclassify** only to correct the grouping: an item the script treated as on-camera that is really b-roll (`broll`), or the other way round (`on_camera`). The key is the item key printed in the report or `context.json`.
+- **Reclassify** only to correct the grouping: an item the script treated as on-camera that is really b-roll (`broll`), or the other way round (`on_camera`). The key is `V<track>@<start frame>` (for example `V1@1234`): the keys of `items` in `.edit/framing/context.json`, which also gives each item's clip name and timecode. A key that matches no item is ignored, so check it against `context.json`.
 - **Push-in lines** come from the script and `transcript.md`: the thesis, a turn in the argument, a punchline, a call to action. Not filler, not setup sentences. Keep them at least 30 s apart, put them on plain setups, and write a reason for each. Fewer is better than weak ones. The solver drops any that break the rules and says why in the report.
 
 ## The framing rules
