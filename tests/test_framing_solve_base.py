@@ -66,11 +66,23 @@ class GestureTest(Base):
 
 class KeepOutTest(Base):
     def test_clutter_on_left_is_removed_within_shift_allowance(self):
-        res = self.solve({"k": m(eyes=(0.53, 0.30))}, decision(keep_out=[(0, 0, 0.29, 1)]))
+        res = self.solve({"k": m(eyes=(0.53, 0.30))}, decision(keep_out=[(0, 0, 0.29, 1)]), budget=2.5)
         r = res["rect"]
         self.assertGreaterEqual(r.left, 0.29 - 1e-6)
         self.assertLessEqual(abs(r.cx - 0.53), OPTS.max_shift * r.w + 1e-6)
         self.assertFalse(any("clutter" in f["text"] for f in res["flags"]))
+        self.assertTrue(res["punch_ok"])
+
+    def test_sliver_kept_rather_than_losing_punch_room(self):
+        # At budget 2 clearing x<0.29 needs zoom ~1.88, leaving no room for a 1.10 punch. The gain
+        # is a thin strip, so the punch room is kept and the sliver is flagged.
+        res = self.solve({"k": m(eyes=(0.53, 0.30))}, decision(keep_out=[(0, 0, 0.29, 1)]))
+        r = res["rect"]
+        self.assertTrue(res["punch_ok"])
+        self.assertGreaterEqual(2.0 * r.w, OPTS.punch_min - 1e-6)
+        self.assertGreater(r.left, 0.25)  # most of the clutter still goes
+        texts = [f["text"] for f in res["flags"]]
+        self.assertTrue(any("clutter left in frame" in t and "punch" in t for t in texts), texts)
 
     def test_gesture_wins_over_clutter_and_is_flagged(self):
         ext = (0.20, 0.17, 0.66, 0.70)
@@ -120,7 +132,47 @@ class OutlierTest(Base):
         self.assertEqual([f["key"] for f in res["flags"]], ["k4"])
 
 
+class CompositionTest(Base):
+    def test_tall_head_keeps_margin_above_head_top(self):
+        ext = (0.42, 0.12, 0.62, 0.50)
+        r = self.solve({"k": m(eyes=(0.52, 0.36), extent=ext)})["rect"]
+        self.assertLessEqual(r.top, 0.12 - OPTS.gesture_margin * r.h + 1e-6)
+
+    def test_eye_line_off_third_is_flagged_in_hard_mode(self):
+        ext = (0.40, 0.10, 0.64, 0.55)
+        res = self.solve({"k": m(eyes=(0.52, 0.40), extent=ext)})
+        r = res["rect"]
+        self.assertLessEqual(r.top, 0.10 - OPTS.gesture_margin * r.h + 1e-6)
+        frac = (0.40 - r.top) / r.h
+        texts = [f["text"] for f in res["flags"]]
+        self.assertEqual(texts, [f"composition: eye line at {round(100 * frac)}% of frame height"])
+
+    def test_missing_extent_is_flagged(self):
+        meas = m()
+        meas["extent"] = None
+        res = self.solve({"k": meas})
+        self.assertTrue(any("gesture" in f["text"] for f in res["flags"] if f["key"] == "k"))
+
+
 class PanFollowTest(Base):
+    def test_keeps_setup_shift_and_ignores_small_drift(self):
+        meas = {f"k{i}": m(eyes=(0.50, 0.30)) for i in range(3)}
+        meas["k3"] = m(eyes=(0.485, 0.30))
+        res = self.solve(meas, decision(keep_out=[(0, 0, 0.215, 1)]))
+        r = res["rect"]
+        self.assertGreater(r.cx, 0.51)  # shifted right to clear the clutter
+        self.assertEqual(res["items"]["k3"], r)
+        self.assertEqual(res["flags"], [])
+
+    def test_item_eye_line_off_band_is_tilted_back(self):
+        meas = {f"k{i}": m(eyes=(0.52, 0.30)) for i in range(3)}
+        meas["k3"] = m(eyes=(0.52, 0.40))
+        res = self.solve(meas)
+        it = res["items"]["k3"]
+        self.assertEqual(it.w, res["rect"].w)
+        self.assertTrue(0.25 - 1e-6 <= (0.40 - it.top) / it.h <= 0.36 + 1e-6, it)
+        self.assertEqual(res["flags"], [])
+
     def test_drifted_item_pans_at_same_zoom(self):
         meas = {f"k{i}": m(eyes=(0.50, 0.30)) for i in range(3)}
         meas["k3"] = m(eyes=(0.62, 0.30))
@@ -141,10 +193,36 @@ class BudgetTest(Base):
         self.assertLessEqual(zoom_of(res["rect"]), OPTS.declutter_cap + 1e-6)
         self.assertFalse(res["punch_ok"])
 
-    def test_small_budget_caps_declutter_at_cap(self):
-        res = self.solve({"k": m()}, decision(keep_out=[(0, 0, 0.2, 1)]), budget=1.2)
+    def test_1080p_without_clutter_stays_at_zoom_1(self):
+        res = self.solve({"k": m()}, budget=1.0)
+        self.assertAlmostEqual(zoom_of(res["rect"]), 1.0)
+        self.assertIn({"key": None, "text": "source has no zoom headroom (budget 1.00): declutter "
+                                            "only, no punch-ins or push-ins"}, res["flags"])
+
+    def test_1080p_declutters_up_to_cap_only_for_clutter(self):
+        res = self.solve({"k": m(eyes=(0.53, 0.30))}, decision(keep_out=[(0, 0, 0.1, 1)]), budget=1.0)
+        r = res["rect"]
+        self.assertGreaterEqual(r.left, 0.1 - 1e-6)
+        self.assertGreater(zoom_of(r), 1.0)
+        self.assertLessEqual(zoom_of(r), OPTS.declutter_cap + 1e-6)
+        self.assertFalse(any("clutter left in frame" in f["text"] for f in res["flags"]))
+
+    def test_budget_not_gestures_blamed_when_cap_blocks_declutter(self):
+        res = self.solve({"k": m(eyes=(0.50, 0.30))}, decision(keep_out=[(0, 0, 0.2, 1)]), budget=1.0)
         self.assertLessEqual(zoom_of(res["rect"]), OPTS.declutter_cap + 1e-6)
+        texts = [f["text"] for f in res["flags"] if "clutter left in frame" in f["text"]]
+        self.assertEqual(len(texts), 1)
+        self.assertIn("budget", texts[0])
+        self.assertNotIn("cutting gestures", texts[0])
+
+    def test_small_budget_without_clutter_never_softens(self):
+        res = self.solve({"k": m()}, budget=1.2)
+        self.assertLessEqual(zoom_of(res["rect"]), 1.2 + 1e-6)
         self.assertFalse(res["punch_ok"])
+
+    def test_headroom_flag_absent_when_budget_allows_punches(self):
+        res = self.solve({"k": m()}, budget=2.0)
+        self.assertFalse(any(f["key"] is None for f in res["flags"]))
 
 
 class WeakDetectionTest(Base):

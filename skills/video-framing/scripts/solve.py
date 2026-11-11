@@ -17,6 +17,8 @@ WEAK_DETECTION = 0.5   # items whose face is found in fewer frames than this get
 STEP = 0.001           # width search step (fraction of source width)
 EYE_HIGH = 0.25        # the eye line may sit between this and 1/3 of the frame height from the top
 N_SAMPLES = 9          # positions tried per axis when a frame must move (keep-out, keep-in, joints)
+EYE_BAND = (0.25, 0.36)  # an eye line outside this band (fraction of frame height) is flagged
+SLIVER_GAIN = 0.5      # tightening that costs the punch room must remove this much of a keep-out box
 
 
 @dataclass(frozen=True)
@@ -173,32 +175,49 @@ def _on_joint(r: Rect, joints, opts: Opts) -> bool:
 def _floors(budget: float, opts: Opts) -> tuple[float, float, bool]:
     """(size floor, keep-out floor, punches allowed by budget).
 
-    With room for punch x push the base frame keeps that room; clutter removal may eat into it
-    (never reduce the declutter crop; the punch is reduced first). Without that room, punches and
-    pushes are off and the declutter crop is capped at declutter_cap.
+    Size floor: with room for punch x push the base frame keeps that room; otherwise it never goes
+    past the budget (no softening for composition or tightness). Keep-out floor: clutter removal may
+    eat into punch room (never reduce the declutter crop; the punch is reduced first), and only
+    clutter removal may soften the image, up to declutter_cap total zoom.
     """
     wmax = _w_max(opts)
+    ko = min(wmax, 1 / max(budget, opts.declutter_cap))
     if budget >= opts.punch * opts.push - EPS:
-        return min(wmax, opts.punch * opts.push / budget), min(wmax, 1 / budget), True
-    f = min(wmax, 1 / min(budget, opts.declutter_cap))
-    return f, f, False
+        return min(wmax, opts.punch * opts.push / budget), ko, True
+    return min(wmax, 1 / budget), ko, False
+
+
+def _face_w(g: dict, opts: Opts) -> float:
+    """Narrowest width that keeps the face at most face_h_max of the frame height."""
+    return g["face_h"] / opts.face_h_max * OUT_ASPECT / opts.aspect if g["face_h"] else 0.0
+
+
+def _eye_frac(g: dict, r: Rect) -> float:
+    """Eye line position as a fraction of the frame height from the top."""
+    return (g["eyes"][1] - r.top) / r.h
 
 
 def _base_w(g: dict, floor: float, opts: Opts) -> float:
     """Tightest width at or above the floor and the face cap that keeps gestures inside.
 
-    Composition (centring, eye line) is kept when some width allows it; otherwise only the hard rules.
+    Composition (centring, eye line) is kept when some width allows it. Otherwise only the hard rules
+    hold, and the width is the one whose eye line comes closest to the upper third (the tightest
+    among near-equals).
     """
     wmax = _w_max(opts)
-    w0 = floor
-    if g["face_h"]:
-        w0 = max(w0, g["face_h"] / opts.face_h_max * OUT_ASPECT / opts.aspect)
-    w0 = min(w0, wmax)
-    for soft in (True, False):
-        for w in _widths(w0, wmax):
-            if _preferred(g, w, opts, soft) is not None:
-                return w
-    return wmax
+    ws = _widths(min(max(floor, _face_w(g, opts)), wmax), wmax)
+    for w in ws:
+        if _preferred(g, w, opts) is not None:
+            return w
+    dist = {}
+    for w in ws:
+        p = _preferred(g, w, opts, soft=False)
+        if p is not None:
+            dist[w] = abs(_eye_frac(g, p) - 1 / 3)
+    if not dist:
+        return wmax
+    best = min(dist.values())
+    return min(w for w, d in dist.items() if d <= best + 0.005)
 
 
 def _fmt(box) -> str:
@@ -208,7 +227,8 @@ def _fmt(box) -> str:
 # ---------------------------------------------------------------- one frame for a group of items
 
 def _solve_group(g: dict, decision: dict, budget: float, opts: Opts) -> tuple[Rect, list[str]]:
-    floor, ko_floor, _ = _floors(budget, opts)
+    floor, ko_floor, budget_ok = _floors(budget, opts)
+    punch_floor = min(opts.punch_min / budget, _w_max(opts)) if budget_ok else 0.0
     wmax = _w_max(opts)
     notes: list[str] = []
     keep_out = [tuple(b) for b in decision.get("keep_out") or []]
@@ -226,22 +246,45 @@ def _solve_group(g: dict, decision: dict, budget: float, opts: Opts) -> tuple[Re
 
     # Keep-out: shift within the allowance, then tighten; the gesture-safe frame wins otherwise.
     if keep_out and _clutter(r, keep_out) > EPS:
-        best = None
-        for wi in _widths(r.w, min(ko_floor, r.w)):
-            best = next((p for p in _placements(g, wi, opts, soft) if _clutter(p, keep_out) <= EPS), None)
-            if best:
-                break
-        if best is None:
-            best_c = None
-            for wi in _widths(r.w, min(ko_floor, r.w)):
+        def first_clear(ws):
+            for wi in ws:
+                p = next((p for p in _placements(g, wi, opts, soft) if _clutter(p, keep_out) <= EPS), None)
+                if p:
+                    return p
+            return None
+
+        def least(ws):
+            best, best_c = None, None
+            for wi in ws:
                 for p in _placements(g, wi, opts, soft):
                     c = _clutter(p, keep_out)
                     if best_c is None or c < best_c - EPS:
                         best, best_c = p, c
-            boxes = [_fmt(b) for b in keep_out if _clutter(best, [b]) > EPS]
-            notes.append("clutter left in frame: keep-out " + ", ".join(boxes)
-                         + " overlaps the gestures; gestures kept")
+            return best
+
+        widths = _widths(r.w, min(ko_floor, r.w))
+        best = first_clear(widths) or least(widths)
+        reason = None
+        if _clutter(best, keep_out) > EPS:
+            # Would a frame tighter than the floor clear it? Then the budget is what blocks it.
+            tighter = _widths(min(ko_floor, r.w), 0.05)[1::5]
+            reason = "budget" if first_clear(tighter) else "gestures"
+        if punch_floor and best.w < punch_floor - EPS <= r.w:
+            # This tightening costs the punch room: only worth it if it removes a real amount.
+            alt = least(_widths(r.w, punch_floor))
+            gain = max(alt.overlaps(b) - best.overlaps(b) for b in keep_out)
+            if gain < SLIVER_GAIN:
+                best, reason = alt, "punch"
         r = best
+        if reason:
+            boxes = ", ".join(_fmt(b) for b in keep_out if _clutter(r, [b]) > EPS)
+            notes.append("clutter left in frame: keep-out " + boxes + {
+                "gestures": " cannot be removed without cutting gestures or going off centre; "
+                            "gestures kept",
+                "budget": f" needs more zoom than the source allows (zoom budget {budget:.2f}, "
+                          f"declutter up to {1 / ko_floor:.2f}x); not a gesture problem",
+                "punch": " left as a sliver at the edge to keep room for punch-ins",
+            }[reason])
 
     # Keep-in: never a sliver on the edge. Include it whole, else exclude it clearly.
     if keep_in and _cuts(r, keep_in):
@@ -271,7 +314,7 @@ def _solve_group(g: dict, decision: dict, budget: float, opts: Opts) -> tuple[Re
     # Joints: the bottom edge cuts between joints. Change size first, then position.
     if g["joints"] and _on_joint(r, g["joints"], opts):
         clutter, cuts = _clutter(r, keep_out), _cuts(r, keep_in)
-        lo = max(ko_floor, min(r.w, floor))
+        lo = max(ko_floor, min(r.w, max(floor, _face_w(g, opts))))
         grow, shrink = _widths(r.w, wmax), _widths(r.w, lo)
         order = [r.w]
         for i in range(1, max(len(grow), len(shrink))):
@@ -299,10 +342,57 @@ def _solve_group(g: dict, decision: dict, budget: float, opts: Opts) -> tuple[Re
             r = found
         else:
             notes.append(f"bottom edge sits on a joint at y={r.bottom:.2f}")
+
+    frac = _eye_frac(g, r)
+    if not EYE_BAND[0] - EPS <= frac <= EYE_BAND[1] + EPS:
+        notes.append(f"composition: eye line at {round(100 * frac)}% of frame height")
     return r, notes
 
 
 # ---------------------------------------------------------------- setup
+
+_NO_HEADROOM = "source has no zoom headroom (budget {budget:.2f}): declutter only, no punch-ins or push-ins"
+
+
+def _follow(k: str, gi: dict, g: dict, rect: Rect, shift: float, keep_out, keep_in, opts: Opts,
+            flags: list) -> Rect:
+    """The setup rect for one item: pan to follow a drifted speaker, fix a stray eye line.
+
+    Drift is measured from the setup's median eye x, so the setup's own off-centre shift (made to
+    clear clutter) is not mistaken for drift and is kept when the item pans. Size never changes.
+    """
+    r = rect
+    hx, hy, _, _ = _ranges(gi, rect.w, opts)
+    hx = hx or (rect.w / 2, 1 - rect.w / 2)
+    hy = hy or (rect.h / 2, 1 - rect.h / 2)
+    ex, ey = gi["eyes"]
+    if abs(ex - g["eyes"][0]) > opts.max_shift * rect.w + EPS:
+        target = _clamp(ex + shift, *hx)
+        n = 40
+        xs = sorted({target, *(hx[0] + (hx[1] - hx[0]) * i / n for i in range(n + 1))},
+                    key=lambda x: abs(x - target))
+        base_c = _clutter(rect, keep_out)
+        x = next((x for x in xs if abs(x - target) <= opts.max_shift * rect.w + EPS
+                  and _clutter(Rect(x, rect.cy, rect.w, rect.aspect), keep_out) <= base_c + EPS), target)
+        r = Rect(x, rect.cy, rect.w, rect.aspect)
+        if _clutter(r, keep_out) > base_c + EPS:
+            flags.append({"key": k, "text": "clutter left in frame: panning to follow the "
+                                            "speaker brings keep-out back in"})
+        if _cuts(r, keep_in) > _cuts(rect, keep_in):
+            flags.append({"key": k, "text": "set dressing cut at frame edge after pan follow"})
+
+    frac = _eye_frac(gi, r)
+    if not EYE_BAND[0] - EPS <= frac <= EYE_BAND[1] + EPS:
+        want = _clamp(frac, EYE_HIGH, 1 / 3)
+        cy = _clamp(ey + r.h / 2 - want * r.h, *hy)
+        moved = Rect(r.cx, cy, r.w, r.aspect)
+        if EYE_BAND[0] - EPS <= _eye_frac(gi, moved) <= EYE_BAND[1] + EPS:
+            r = moved
+        else:
+            flags.append({"key": k, "text": f"composition: eye line at {round(100 * frac)}% "
+                                            f"of frame height"})
+    return r
+
 
 def solve_base(setup_items: list[str], measures: dict, decision: dict, budget: float,
                opts: Opts) -> dict:
@@ -322,6 +412,8 @@ def solve_base(setup_items: list[str], measures: dict, decision: dict, budget: f
         rect = Rect(0.5, 0.5, w, opts.aspect)
         for k in setup_items:
             flags.append({"key": k, "text": "speaker not detected in this setup: full source frame kept"})
+        if not budget_ok:
+            flags.append({"key": None, "text": _NO_HEADROOM.format(budget=budget)})
         return {"rect": rect, "items": {k: rect for k in setup_items}, "flags": flags,
                 "punch_ok": False}
 
@@ -329,6 +421,7 @@ def solve_base(setup_items: list[str], measures: dict, decision: dict, budget: f
         return _group([measures[k] for k in keys])
 
     # Outliers: an item that loosens the setup by more than opts.outlier gets its own frame.
+    # Leave-one-out needs at least 3 strong items, and fewer than half of them may become outliers.
     remaining, outliers = list(strong), []
     while len(remaining) - 1 > len(strong) / 2:
         w_all = _base_w(group(remaining), floor, opts)
@@ -343,23 +436,13 @@ def solve_base(setup_items: list[str], measures: dict, decision: dict, budget: f
     g = group(remaining)
     rect, notes = _solve_group(g, decision, budget, opts)
     flags.extend({"key": remaining[0], "text": n} for n in notes)
+    setup_shift = rect.cx - g["eyes"][0]   # off-centre shift the setup chose (keep-out), kept by pans
 
     items: dict[str, Rect] = {}
     for k in setup_items:
         m = measures.get(k)
         if k in remaining:
-            gi = group([k])
-            ex = gi["eyes"][0]
-            r = rect
-            if abs(ex - rect.cx) > opts.max_shift * rect.w + EPS:  # pan follow, same size
-                hx = _ranges(gi, rect.w, opts)[0] or (rect.w / 2, 1 - rect.w / 2)
-                r = Rect(_clamp(ex, *hx), rect.cy, rect.w, rect.aspect)
-                if _clutter(r, keep_out) > _clutter(rect, keep_out) + EPS:
-                    flags.append({"key": k, "text": "clutter left in frame: panning to follow the "
-                                                    "speaker brings keep-out back in"})
-                if _cuts(r, keep_in) > _cuts(rect, keep_in):
-                    flags.append({"key": k, "text": "set dressing cut at frame edge after pan follow"})
-            items[k] = r
+            items[k] = _follow(k, group([k]), g, rect, setup_shift, keep_out, keep_in, opts, flags)
         elif k in strong:  # outlier
             ratio = dict(outliers)[k]
             own, own_notes = _solve_group(group([k]), decision, budget, opts)
@@ -372,6 +455,12 @@ def solve_base(setup_items: list[str], measures: dict, decision: dict, budget: f
             pct = round(100 * (m or {}).get("detected", 0.0))
             flags.append({"key": k, "text": f"speaker found in only {pct}% of sampled frames: "
                                             f"setup frame used, check it"})
+        if k in strong and not m.get("extent"):
+            flags.append({"key": k, "text": "no head or hand extent measured: frame sized from the "
+                                            "face only, check that no gesture is cut"})
 
+    if not budget_ok:
+        flags.append({"key": None, "text": _NO_HEADROOM.format(budget=budget)})
     punch_ok = budget_ok and budget * rect.w >= opts.punch_min - EPS
-    return {"rect": rect, "items": items, "flags": flags, "punch_ok": punch_ok}
+    unique = list({(f["key"], f["text"]): f for f in flags}.values())  # setup and item checks overlap
+    return {"rect": rect, "items": items, "flags": unique, "punch_ok": punch_ok}
