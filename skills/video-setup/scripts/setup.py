@@ -152,9 +152,24 @@ def check_footage(rep: Report, project):
             rep.warn(f"Footage is {HDR_TRANSFERS[t]}, but the project input colour space is '{colour_in}'.")
 
 
+def check_storyboard(rep: Report, config: dict, workdir: Path | None = None):
+    print("Storyboard")
+    path = config.get("storyboard")
+    if not path:
+        rep.warn("No storyboard or script recorded. video-organize can still find takes, but cannot match "
+                 "them to scenes, score completeness or offer a rename. Add one with write --storyboard.")
+    elif workdir is not None and not (workdir / path).exists():
+        rep.warn(f"Storyboard {path} does not exist.")
+    else:
+        rep.ok(path)
+
+
 def cmd_check(args) -> int:
     rep = Report()
     check_tools(rep)
+    workdir = Path(args.workdir).resolve()
+    cfg_path = workdir / rvs.STATE_DIR / "config.json"
+    check_storyboard(rep, json.loads(cfg_path.read_text()) if cfg_path.exists() else {}, workdir)
     _, project = check_resolve(rep)
     if project is not None:
         check_timeline(rep, project)
@@ -179,7 +194,10 @@ def _data(value) -> str:
 
 def render_agents(config: dict, state: dict | None) -> str:
     rows = [("Script", config.get("script")),
-            ("On-set verdict phrases", ", ".join(config.get("phrases") or []) or None),
+            ("Storyboard", config.get("storyboard")),
+            ("On-set approve phrases", ", ".join(config.get("approve_phrases") or []) or None),
+            ("On-set reject phrases", ", ".join(config.get("reject_phrases") or []) or None),
+            ("Verdict phrases (meaning unknown)", ", ".join(config.get("phrases") or []) or None),
             ("Music folder", config.get("music")),
             ("SFX folder", config.get("sfx")),
             ("Colour look (.drx)", config.get("look")),
@@ -227,7 +245,7 @@ The user also edits in Resolve between sessions. `resolve-bridge` records those 
 - `{rvs_checklist.FILENAME}`: progress and issues. Generated, except for the notes section and the issue boxes.
 - `.edit/`: state, plans and reports. Do not edit by hand.
 - `generated/<step>/`: renders, graphics and other files a step creates and imports into Resolve.
-- Never move, rename or overwrite source footage.
+- Only rename source footage through `video-organize`, after the user approves the list. Never move or overwrite it.
 
 ## This video
 
@@ -254,29 +272,37 @@ def write_agents(path: Path, block: str):
 
 
 def cmd_write(args) -> int:
-    s = rvs.Session(args.workdir)
+    s = rvs.Session(args.workdir, connect_now=False)
     config = load_config(s)
-    for key in ("script", "music", "sfx", "look", "delivery"):
+    for key in ("script", "storyboard", "music", "sfx", "look", "delivery"):
         value = getattr(args, key)
         if value is not None:
             config[key] = value
-    if args.phrases is not None:
-        config["phrases"] = args.phrases
+    for key in ("approve_phrases", "reject_phrases"):
+        value = getattr(args, key)
+        if value is not None:
+            config[key] = value
     s.dir.mkdir(parents=True, exist_ok=True)
     (s.dir / "config.json").write_text(json.dumps(config, indent=1, ensure_ascii=False))
 
-    if s.state is None and args.timeline:
+    adopting = args.timeline and not (s.state and s.state["current"].get("timeline"))
+    if adopting:
+        s.resolve, s.project = rvs.connect()  # only tracking a timeline needs Resolve
+        if s.state and s.state.get("resolve_project") not in (None, s.project.GetName()):
+            raise rvs.RvsError(f"Resolve has project '{s.project.GetName()}' open, but this folder's state "
+                               f"belongs to '{s.state['resolve_project']}'. Open that project first.")
         entry, plan = s.adopt(args.timeline, args.base, args.archive_folder)
         print(f"tracking started: v{entry['version']:02d} {entry['timeline']} ({len(plan['items'])} items)")
-    elif s.state is None:
-        print("not tracking a timeline yet: re-run with --timeline once the first cut exists")
     elif args.timeline:
         print(f"already tracking {s.state['current']['timeline']}: --timeline ignored")
+    else:
+        s.init_state(args.base)  # no timeline yet is normal: organizing comes first
+        if not s.state["current"].get("timeline"):
+            print("not tracking a timeline yet: re-run with --timeline once the first cut exists")
 
     for item in args.skip or []:
         step, _, reason = item.partition("=")
-        if s.state is None:
-            raise rvs.RvsError("Cannot skip steps before a timeline is tracked.")
+        s.init_state(args.base)
         s.skip_step(step.strip(), reason.strip())
         print(f"skipped {step.strip()}")
 
@@ -298,7 +324,9 @@ def main(argv=None) -> int:
     w.add_argument("--archive-folder", default="Archive")
     w.add_argument("--skip", action="append", metavar="STEP=REASON", help="repeatable")
     w.add_argument("--script", help="where the script lives: a file path or a short description")
-    w.add_argument("--phrases", nargs="*", help="what the speaker says on set to judge a take")
+    w.add_argument("--storyboard", help="storyboard or script file (see video-organize for the format)")
+    w.add_argument("--approve-phrases", nargs="*", help="what the speaker says on set to keep a take")
+    w.add_argument("--reject-phrases", nargs="*", help="what the speaker says on set to reject a take")
     w.add_argument("--music", help="music folder")
     w.add_argument("--sfx", help="sound effects folder")
     w.add_argument("--look", help="path to a .drx grade")

@@ -2,14 +2,14 @@
 
 AI agent skills that edit scripted talking-head videos in DaVinci Resolve Studio. You give it raw takes and a script. It builds the cut, frames it, grades it, mixes it and makes vertical shorts, all as **editable Resolve timelines**, not a flattened mp4.
 
-> **Status: early.** Available now: `resolve-bridge` (the versioned, always-saved base the other skills build on) `video-setup` (prepares each video project) and `video-tighten` (cut edges and pauses). The other skills are next. See [docs/ROADMAP.md](docs/ROADMAP.md).
+> **Status: early.** Available now: `resolve-bridge` (the versioned, always-saved base the other skills build on) `video-setup` (prepares each video project), `video-organize` (finds and scores takes, catalogues b-roll) and `video-tighten` (cut edges and pauses). The other skills are next. See [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## What it does
 
 | Step | Skill | What you get |
 |---|---|---|
 | Set up | `video-setup` | Tools and footage checked, first timeline tracked, an `AGENTS.md` with the editing rules for that video |
-| Organise | `video-ingest` | Raw files in random order → transcribed, matched to the script, b-roll catalogued |
+| Organise | `video-organize` | Raw files in random order → transcribed, takes found and scored per storyboard scene, b-roll catalogued, files renamed after you approve |
 | First cut | `video-assemble` | Best take per script line, b-roll placed, a list of shots still missing |
 | Pacing | `video-tighten` | Dead air removed, natural breathing room at every cut |
 | Framing | `video-framing` | Cluttered edges cropped out, punch-ins on jump cuts, eyes stay in place across cuts, push-ins on key lines |

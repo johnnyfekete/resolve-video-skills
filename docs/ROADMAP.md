@@ -9,7 +9,7 @@ People who record scripted talking-head videos (YouTube explainers, essays, tuto
 ## The pipeline
 
 ```
-raw files ─► ingest ─► assemble ─► tighten ─► framing ─► color ─► sound ─► graphics ─► captions ─► qc ─► deliver ─► shorts
+raw files ─► organize ─► assemble ─► tighten ─► framing ─► color ─► sound ─► graphics ─► captions ─► qc ─► deliver ─► shorts
                 └───────────── every step reads and writes the plan through resolve-bridge ─────────────┘
 ```
 
@@ -43,13 +43,15 @@ Every session starts from the latest saved state, and every step ends with a sav
 - Records the script location and per-video settings, starts tracking the first timeline, marks skipped steps.
 - Generates `AGENTS.md` for the video: always build on the latest version, where versions and files go, how hand edits and issues work. Text outside the generated block is kept.
 
-### 1. `video-ingest`: random raw files → organised catalogue
+### 1. `video-organize`: random raw files → organised catalogue — **built**
 
-- Transcribe every clip in short slices (~30 s). Whisper on long files drops repeated takes and stretches word timestamps.
-- Match spoken text to the script → scene id per take. Clips without speech are b-roll.
-- B-roll: sample frames, describe them with vision, store a searchable catalogue.
-- Detect on-set verdicts as take markers. The phrases are configurable (e.g. "one more time", "that was good").
-- Flag segments in a language other than the script's.
+- Local Whisper transcription of every recording, in slices cut at silences, saved per recording and not repeated when the file is unchanged.
+- Takes found by aligning speech with a Markdown storyboard (one `## S01` block per scene, optional `Setup`, `Voiceover`, `B-roll`). No storyboard: takes are grouped by similar text, with a warning.
+- Score 0-100 per take: complete, broken words, audio quality. On-set approve and reject phrases outrank the score. Patches from other takes swap full ideas only.
+- B-roll: frames every 2 s, sharpness, exposure and shake measured, the agent describes the frames and matches them to the storyboard's `B-roll:` notes.
+- Film-style ids and names (`S02A-T03`, `S02A_T03_<original>`), shot letters from `Setup` or asked of the user.
+- Results: `TAKES.md`, `.edit/organize/*.json`, issues for scenes with no usable take and b-roll not filmed. A rename of files and Resolve clips is offered and applied only after the user approves the full list, with undo.
+- Runs with Resolve closed. Resolve is needed only to rename clips already in a project.
 
 ### 2. `video-assemble`: script → first cut
 
@@ -130,7 +132,7 @@ Now:
 4. `video-sound`
 5. `video-color`
 
-Later: `video-qc`, `video-shorts`, `video-captions`, `video-ingest`, `video-assemble`, `video-graphics`, `video-deliver`, and a thin `video-edit` orchestrator that runs the chain.
+Later: `video-qc`, `video-shorts`, `video-captions`, `video-assemble`, `video-graphics`, `video-deliver`, and a thin `video-edit` orchestrator that runs the chain.
 
 ## Configuration (per user)
 
