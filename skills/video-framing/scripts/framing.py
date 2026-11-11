@@ -409,10 +409,13 @@ def run_solve(s, opt, workdir: Path) -> dict:
             kept_in.append(p)
 
     rects, pushes, cflags = {}, [], []
+    cuts_used = None
     if cam:
         budget = min(budgets.values())
         aspect = Counter(round(a, 4) for a in aspects).most_common(1)[0][0]
         cuts = visible_cuts(plan, cam, setup_of)
+        mixed = len({round(b, 4) for b in budgets.values()}) > 1 or len({round(a, 4) for a in aspects}) > 1
+        cuts_used = {"budget": round(budget, 4), "aspect": aspect, "mixed": mixed}
         rects, pushes, cflags = solve_cuts(plan, cam, cuts, item_rects, measures, setup_of, info,
                                            kept_in, budget, dataclasses.replace(opts, aspect=aspect))
     if no_punch:
@@ -428,6 +431,9 @@ def run_solve(s, opt, workdir: Path) -> dict:
 
     solution = _solution(plan, s, data, setups, solve_keys, results, rects, pushes, flags, hand,
                          by_key, measures, src_of, budgets, push_ins, opts)
+    solution["cuts"] = cuts_used
+    solution["on_camera_matches"] = sorted({dec.match_key(i) for i in _with_reclassify(plan, on_camera(plan), reclass)}
+                                           | {dec.match_key(by_key[k]) for k in listed})
     (fdir / "solution.json").write_text(json.dumps(solution, indent=1, ensure_ascii=False))
     previews = write_previews(workdir, plan, solution, data)
     write_report(solution, data, gdir / "REPORT.md", previews)
@@ -483,6 +489,7 @@ def _solution(plan, s, data, setups, solve_keys, results, rects, pushes, flags, 
                            "start_frame": p["start_frame"], "end_frame": p["end_frame"],
                            "comp_start": round(p["start_frame"] * sf / fps, 3),
                            "comp_end": round(p["end_frame"] * sf / fps, 3),
+                           "comp_len": round((it["end"] - it["start"]) * sf / fps, 3),
                            "size": round(p["from"].w / p["to"].w, 4),
                            "pivot": [round(v, 5) for v in measures[p["key"]]["eyes"]],
                            "from": _rect_json(p["from"]), "to": _rect_json(p["to"]),
@@ -505,6 +512,7 @@ def _solution(plan, s, data, setups, solve_keys, results, rects, pushes, flags, 
         it = by_key[k]
         sid = next((x for x, keys in setups.items() if k in keys), None)
         left.append({"key": k, "clip": it.get("clip"), "setup": sid, "timecode": tc(it["start"] / fps),
+                     "match": dec.match_key(it),
                      "props": it.get("props") or {}, "fusion_comps": int(it.get("fusion_comps") or 0)})
     return {"timeline": {**plan["timeline"], "version": s.state["current"]["version"]},
             "options": dataclasses.asdict(opts), "setups": out_setups, "items": items,
@@ -582,6 +590,11 @@ def write_report(sol: dict, data: dict, path: Path, previews: dict) -> None:
             L.append(f"- Preview: setups/{sid}_before_after.jpg")
         L.append("")
     punches = [(k, e) for k, e in sol["items"].items() if e["kind"] == "punch"]
+    cu = sol.get("cuts")
+    if cu and cu.get("mixed"):
+        L += [f"Setups differ in zoom budget or source aspect. Punch-ins, eye trace and push-ins were "
+              f"solved with one budget {cu['budget']:.2f}x and source aspect {cu['aspect']:.4f} "
+              f"(the smallest budget, the most common aspect); base frames use each setup's own.", ""]
     L += ["## Punch-ins", ""]
     if punches:
         L += ["| Clip | Timeline | Setup | Zoom | Punch |", "|---|---|---|---|---|"]

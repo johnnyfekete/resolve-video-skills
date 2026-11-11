@@ -144,8 +144,27 @@ spline.SetKeyFrames({t0: {1: 1.00, "RH": {1: dt, 2: 0.0}},
   `item.GetFusionCompByIndex(i).FindTool("rvs_pushin")`. Push-ins do not show in `GetProperty()`,
   and `item.GetEffects("fusion")` stays empty for a comp added this way.
 - **Removing / replacing (re-runs):** `TimelineItem.DeleteFusionCompByName(name) -> bool` (in the
-  shipped `DaVinciResolveScript.pyi`; the scripting folder has README.md, not README.txt). To replace
-  a push-in, find the comp whose `FindTool("rvs_pushin")` is set, using `GetFusionCompNameList()` and
-  `GetFusionCompByName(name)`, delete it with `DeleteFusionCompByName(name)`, then add a new comp.
-  Comps without that tool are the user's and stay. Also available: `RenameFusionCompByName(old, new)`,
-  `LoadFusionCompByName(name)` (makes it the active comp). Delete was not exercised in the spike.
+  shipped `DaVinciResolveScript.pyi`; the scripting folder has README.md, not README.txt).
+  **Resolve refuses to delete an item's only comp** (returns False, measured 2026-11-11 in the scratch
+  project); with a second comp present the same call works. `RenameFusionCompByName(old, new)` works.
+  So `apply_resolve.py` replaces a push-in in this order:
+  1. rename framing's old comp (`rvs_pushin` -> `rvs_pushin_old<n>`) to free the name;
+  2. add the new comp and build the push-in in it;
+  3. rename the new comp to `rvs_pushin`;
+  4. delete the old comp (it is no longer the only one);
+  5. check that exactly one comp holds the `rvs_pushin` tool.
+
+  Removing a push-in when framing's comp is the item's only comp: neutralise it in place (delete the
+  `rvs_pushin` Transform, `MediaOut1.ConnectInput("Input", MediaIn1)`) and rename it `rvs_neutral`.
+  A neutral comp is a pass-through; `rvs.export_plan` does not count comps whose names start with
+  `rvs_neutral` (`rvs.fusion_comp_count`), so it never blocks a build and is not a hand edit. A later
+  push-in deletes it as in step 4. Framing's own comps are those named `rvs_pushin*` or `rvs_neutral*`
+  or holding the `rvs_pushin` tool; every other comp is the user's and stays. Every rename result is
+  checked. Replace and neutralise were run live (60 fps HLG clip, 24 fps timeline) and render as
+  expected; the neutralised comp was then still named `rvs_pushin`, the `rvs_neutral` name came later and
+  is only covered by unit tests. `GetFusionCompNameList()` returns an empty dict, not a list, for an
+  item without comps.
+- **Comp length (VFR):** a 132-frame item of a 60 fps phone clip (330 source frames expected) gave a comp
+  with `COMPN_RenderStart..COMPN_RenderEnd` = 0..327 (328 frames). `apply_resolve.py` compares that
+  length to the item length in source frames after adding a push-in and raises an issue when they
+  differ by more than one frame; the push-in is kept.

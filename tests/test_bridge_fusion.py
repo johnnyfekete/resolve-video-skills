@@ -51,6 +51,19 @@ class BridgeFusionTest(unittest.TestCase):
         self.assertEqual(a["fusion_comps"], 2)
         self.assertNotIn("fusion_comps", b)
 
+    def test_neutral_comps_are_not_counted(self):
+        neutral, push = FakeItem("a", 0, 48, 1), FakeItem("b", 48, 96, 1)
+        neutral.GetFusionCompNameList = lambda: ["rvs_neutral"]
+        push.GetFusionCompNameList = lambda: ["rvs_pushin"]
+        a, b = rvs.export_plan(FakeTimeline([neutral, push]))["items"]
+        self.assertNotIn("fusion_comps", a)
+        self.assertEqual(b["fusion_comps"], 1)
+
+    def test_name_list_failure_falls_back_to_count(self):
+        it = FakeItem("a", 0, 48, 2)
+        it.GetFusionCompNameList = lambda: (_ for _ in ()).throw(AttributeError())
+        self.assertEqual(rvs.export_plan(FakeTimeline([it]))["items"][0]["fusion_comps"], 2)
+
     def test_export_survives_missing_api(self):
         it = FakeItem("a", 0, 48, 0)
         it.GetFusionCompCount = lambda: (_ for _ in ()).throw(AttributeError())

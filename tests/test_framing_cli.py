@@ -143,6 +143,22 @@ class SolveCliTest(unittest.TestCase):
         section = report.lower().split("left alone", 1)[1]
         self.assertIn("v1@720", section)
 
+    def test_report_names_the_cut_budget_when_setups_differ(self):
+        self.w.decide()
+        sizes = {str(self.w.a): (3840, 2160), str(self.w.b): (2560, 1440)}
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(framing, "source_size", side_effect=lambda p: sizes[str(p)]), \
+                mock.patch.object(framing, "write_previews", return_value={}), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            self.assertEqual(framing.main(["solve", "--workdir", str(self.w.root)]), 0, out.getvalue())
+        self.assertIn("one budget 1.33x", self.w.report())
+        self.assertEqual(self.w.solution()["cuts"]["budget"], 1.3333)
+
+    def test_on_camera_matches_include_hand_framed(self):
+        self.w.decide()
+        self.w.solve()
+        self.assertIn(decisions.match_key(self.w.items[3]), self.w.solution()["on_camera_matches"])
+
     def test_no_push_option(self):
         self.w.decide()
         code, out = self.w.solve("--no-push")
@@ -261,6 +277,8 @@ class FakeTool:
 
 
 class FakeComp:
+    render_end = 599.0   # 600 source frames: a 240-frame item at 60 fps on a 24 fps timeline
+
     def __init__(self):
         self.tools = {}
         for n in ("MediaIn1", "MediaOut1"):
@@ -269,6 +287,9 @@ class FakeComp:
 
     def FindTool(self, name):
         return self.tools.get(name)
+
+    def GetAttrs(self):
+        return {"COMPN_RenderStart": 0.0, "COMPN_RenderEnd": self.render_end}
 
     def AddTool(self, kind, x, y):
         t = FakeTool(self, f"{kind}1")
@@ -346,6 +367,7 @@ class ApplyTest(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 apply_resolve.apply(s, _solution([0]), Path(td) / "applied.json")
             self.assertFalse((Path(td) / "applied.json").exists())
+            self.assertFalse((Path(td) / "applied.json.pending").exists())
         self.assertEqual(s.calls[-1], ("abandon",))
 
     def test_missing_item_abandons(self):
@@ -355,13 +377,14 @@ class ApplyTest(unittest.TestCase):
                 apply_resolve.apply(s, _solution([0, 240]), Path(td) / "applied.json")
         self.assertEqual(s.calls[-1], ("abandon",))
 
-    PUSH = {"key": "V1@0", "comp_start": 5.0, "comp_end": 200.0, "size": 1.06, "pivot": [0.5, 0.3]}
+    PUSH = {"key": "V1@0", "comp_start": 5.0, "comp_end": 200.0, "comp_len": 600.0, "size": 1.06,
+            "pivot": [0.5, 0.3]}
 
-    def _apply(self, item, pushes):
+    def _apply(self, item, pushes, session=None):
         sol = _solution([0])
         sol["pushes"] = pushes
         with tempfile.TemporaryDirectory() as td:
-            apply_resolve.apply(FakeSession(FakeTimeline([item])), sol, Path(td) / "applied.json")
+            apply_resolve.apply(session or FakeSession(FakeTimeline([item])), sol, Path(td) / "applied.json")
             return json.loads((Path(td) / "applied.json").read_text())
 
     def test_push_comp_built_and_named(self):
@@ -385,10 +408,49 @@ class ApplyTest(unittest.TestCase):
         item = FakeItem("S01_A.MOV", 86400)
         self._apply(item, [self.PUSH])
         applied = self._apply(item, [])
-        comp = item.comps["rvs_pushin"]
+        self.assertEqual(list(item.comps), ["rvs_neutral"])
+        comp = item.comps["rvs_neutral"]
         self.assertIsNone(comp.FindTool("rvs_pushin"))
         self.assertIs(comp.FindTool("MediaOut1").inputs["Input"], comp.FindTool("MediaIn1"))
+        self.assertEqual(applied["/a.mov|0|240"]["fusion_comps"], 0)  # the bridge ignores it too
+        # a later push replaces the neutral comp
+        applied = self._apply(item, [self.PUSH])
+        self.assertEqual(list(item.comps), ["rvs_pushin"])
         self.assertEqual(applied["/a.mov|0|240"]["fusion_comps"], 1)
+
+    def test_failed_rename_abandons(self):
+        item = FakeItem("S01_A.MOV", 86400)
+        item.RenameFusionCompByName = lambda old, new: False
+        s = FakeSession(FakeTimeline([item]))
+        with self.assertRaisesRegex(apply_resolve.ApplyError, "rename"):
+            self._apply(item, [self.PUSH], s)
+        self.assertEqual(s.calls[-1], ("abandon",))
+
+    def test_comp_length_mismatch_is_flagged_and_push_kept(self):
+        item = FakeItem("S01_A.MOV", 86400)
+        s = FakeSession(FakeTimeline([item]))
+        with mock.patch.object(FakeComp, "render_end", 596.0):
+            self._apply(item, [self.PUSH], s)
+        self.assertIsNotNone(item.comps["rvs_pushin"].FindTool("rvs_pushin"))
+        timing = [i for i in s.issues if "push-in timing" in i[1]]
+        self.assertEqual(len(timing), 1)
+        self.assertIn("S01_A.MOV", timing[0][1])
+
+    def test_comp_length_within_a_frame_is_not_flagged(self):
+        item = FakeItem("S01_A.MOV", 86400)
+        s = FakeSession(FakeTimeline([item]))
+        self._apply(item, [self.PUSH], s)
+        self.assertFalse([i for i in s.issues if "push-in timing" in i[1]])
+
+    def test_applied_prunes_items_no_longer_on_camera(self):
+        sol = _solution([0])
+        sol["on_camera_matches"] = ["/a.mov|0|240", "/hand.mov|0|10"]
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "applied.json"
+            path.write_text(json.dumps({"/gone.mov|0|10": {"props": {}}, "/hand.mov|0|10": {"props": {}}}))
+            apply_resolve.apply(FakeSession(FakeTimeline([FakeItem("S01_A.MOV", 86400)])), sol, path)
+            self.assertEqual(sorted(json.loads(path.read_text())), ["/a.mov|0|240", "/hand.mov|0|10"])
+            self.assertFalse(path.with_name("applied.json.pending").exists())
 
     def test_user_comp_is_never_touched(self):
         item = FakeItem("S01_A.MOV", 86400)

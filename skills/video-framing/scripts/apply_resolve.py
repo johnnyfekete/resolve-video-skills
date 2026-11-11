@@ -9,13 +9,16 @@ version stays current.
 from __future__ import annotations
 
 import math
+import os
 import sys
 from pathlib import Path
 
 import decisions as dec
+import rvs
 
 PUSH_TOOL = "rvs_pushin"
 PUSH_COMP = "rvs_pushin"   # framing names its own comps; old ones are renamed PUSH_COMP_old<n>
+NEUTRAL_COMP = rvs.NEUTRAL_COMP  # a neutralised comp: pass-through, ignored by the bridge
 SCALING_KEY = "timelineInputResMismatchBehavior"
 SCALING_OK = "scaleToCrop"
 FRAMING_SET = ("ZoomX", "ZoomY", "Pan", "Tilt")
@@ -55,18 +58,19 @@ def _comp_names(item) -> list[str]:
 
 
 def _own_comps(item) -> list[str]:
-    """Names of framing's own comps on the item: named PUSH_COMP or holding the PUSH_TOOL.
-    Every other comp is the user's and is never touched."""
+    """Names of framing's own comps on the item: named PUSH_COMP* or NEUTRAL_COMP*, or holding the
+    PUSH_TOOL. Every other comp is the user's and is never touched."""
     out = []
     for name in _comp_names(item):
         comp = item.GetFusionCompByName(name)
-        if name.startswith(PUSH_COMP) or (comp is not None and comp.FindTool(PUSH_TOOL) is not None):
+        if name.startswith((PUSH_COMP, NEUTRAL_COMP)) or (comp is not None and comp.FindTool(PUSH_TOOL) is not None):
             out.append(name)
     return out
 
 
 def _neutralise(item, name: str) -> None:
-    """Make one of framing's comps a pass-through: Resolve refuses to delete an item's only comp."""
+    """Make one of framing's comps a pass-through named NEUTRAL_COMP: Resolve refuses to delete an
+    item's only comp, and the bridge ignores comps with that name."""
     comp = item.GetFusionCompByName(name)
     tr = comp.FindTool(PUSH_TOOL)
     if tr is not None:
@@ -77,8 +81,31 @@ def _neutralise(item, name: str) -> None:
     mo.ConnectInput("Input", mi)
     if comp.FindTool(PUSH_TOOL) is not None:
         raise ApplyError(f"could not remove the push-in from comp '{name}' on {item.GetName()}")
-    if name != PUSH_COMP:
-        item.RenameFusionCompByName(name, PUSH_COMP)
+    if name != NEUTRAL_COMP:
+        _rename(item, name, NEUTRAL_COMP)
+
+
+def _rename(item, old: str, new: str) -> None:
+    if not item.RenameFusionCompByName(old, new):
+        raise ApplyError(f"could not rename the Fusion comp '{old}' to '{new}' on {item.GetName()}")
+
+
+def _with_tool(item) -> list[str]:
+    out = []
+    for name in _comp_names(item):
+        comp = item.GetFusionCompByName(name)
+        if comp is not None and comp.FindTool(PUSH_TOOL) is not None:
+            out.append(name)
+    return out
+
+
+def _comp_length(comp) -> float | None:
+    """Rendered length of a comp in source frames (COMPN_RenderStart..End, inclusive), if known."""
+    try:
+        a = comp.GetAttrs() or {}
+        return float(a["COMPN_RenderEnd"]) - float(a["COMPN_RenderStart"]) + 1
+    except Exception:
+        return None
 
 
 def _drop_comps(item, names: list[str]) -> None:
@@ -139,6 +166,30 @@ def add_pushin(item, push: dict):
     return comp
 
 
+def _timing_flag(key: str, e: dict, push: dict, comp) -> list[dict]:
+    """A flag when the comp's length differs from the item's length in source frames by more than
+    one frame (variable frame rate sources): the push is kept, its timing may be off."""
+    want, got = push.get("comp_len"), _comp_length(comp)
+    if want is None or got is None or abs(got - float(want)) <= 1:
+        return []
+    return [{"key": key, "setup": e.get("setup"),
+             "where": f"{e['clip']} at {e.get('timecode', '')}".strip(),
+             "text": f"push-in timing: the Fusion comp of {e['clip']} is {got:.0f} source frames long, the "
+                     f"item {float(want):.0f}; the source may have a variable frame rate. Check that the "
+                     f"push-in lands on its line"}]
+
+
+def _applied(path: Path, solution: dict, entries: dict) -> dict:
+    """The new applied record: old entries of items still on camera (hand-framed ones included),
+    updated with this run's entries. Entries of items no longer on camera are pruned."""
+    old = dec.load_applied(path) or {}
+    keep = solution.get("on_camera_matches")
+    if keep is not None:
+        old = {k: v for k, v in old.items() if k in set(keep)}
+    old.update(entries)
+    return old
+
+
 def _summary(solution: dict) -> str:
     zooms = [s["zoom"] for s in solution["setups"].values() if s.get("zoom")]
     punches = sum(e.get("kind") == "punch" for e in solution["items"].values())
@@ -150,7 +201,9 @@ def _summary(solution: dict) -> str:
 def apply(session, solution: dict, applied_path=None) -> tuple[dict, list[dict]]:
     """Fork, frame, push, save and record. Returns (history entry, issues added)."""
     applied_path = Path(applied_path) if applied_path else Path(session.dir) / "framing" / "applied.json"
+    pending = applied_path.with_name(applied_path.name + ".pending")
     pushes = {p["key"]: p for p in solution.get("pushes", [])}
+    extra: list[dict] = []
     tl = session.begin_step("framing")
     try:
         index = _index(tl)
@@ -164,29 +217,37 @@ def apply(session, solution: dict, applied_path=None) -> tuple[dict, list[dict]]
             props = {k: e["props"][k] for k in FRAMING_SET}
             old = _own_comps(item)
             for n, name in enumerate(old):  # free the name for the new comp
-                if name == PUSH_COMP and item.RenameFusionCompByName(name, f"{PUSH_COMP}_old{n}"):
+                if name == PUSH_COMP:
+                    _rename(item, name, f"{PUSH_COMP}_old{n}")
                     old[n] = f"{PUSH_COMP}_old{n}"
             got = _set_props(item, key, props)
             if key in pushes:
                 before = set(_comp_names(item))
-                add_pushin(item, pushes[key])
+                comp = add_pushin(item, pushes[key])
                 added = [x for x in _comp_names(item) if x not in before]
-                if added:
-                    item.RenameFusionCompByName(added[0], PUSH_COMP)
+                if len(added) != 1:
+                    raise ApplyError(f"could not tell which Fusion comp is the new push-in on {key}")
+                _rename(item, added[0], PUSH_COMP)
+                extra += _timing_flag(key, e, pushes[key], comp)
             _drop_comps(item, old)  # after the new comp exists: Resolve keeps an item's only comp
-            entries[e["match"]] = {"props": _recorded(got),
-                                   "fusion_comps": int(item.GetFusionCompCount() or 0)}
+            holders = _with_tool(item)
+            if holders != ([PUSH_COMP] if key in pushes else []):
+                raise ApplyError(f"{key}: expected {'one push-in comp' if key in pushes else 'no push-in'}, "
+                                 f"found the push-in tool in {holders or 'no comp'}")
+            entries[e["match"]] = {"props": _recorded(got), "fusion_comps": rvs.fusion_comp_count(item)}
+        applied = _applied(applied_path, solution, entries)
+        dec.save_applied(pending, applied)   # survives a failure right after finish_step
         entry = session.finish_step(_summary(solution))
+        os.replace(pending, applied_path)
     except BaseException:
+        if pending.exists():
+            pending.unlink()
         session.abandon_step()
         print("framing apply failed: the step was abandoned. The forked timeline stays in Resolve for "
               "inspection; the previous version is still current.", file=sys.stderr)
         raise
-    applied = dec.load_applied(applied_path) or {}
-    applied.update(entries)
-    dec.save_applied(applied_path, applied)
     added = []
-    for f in solution.get("flags", []):
+    for f in solution.get("flags", []) + extra:
         who = f.get("key") or (f"setup {f['setup']}" if f.get("setup") else "timeline")
         issue = session.add_issue("framing", f"{who}: {f['text']}", f.get("where"))
         if issue:

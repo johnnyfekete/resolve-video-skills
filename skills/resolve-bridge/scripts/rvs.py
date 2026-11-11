@@ -170,6 +170,27 @@ def _fades(item) -> dict:
     return {k: f[k] for k in ("FadeIn", "FadeOut") if f.get(k)}
 
 
+NEUTRAL_COMP = "rvs_neutral"  # pass-through comps a skill could not delete (Resolve keeps an item's only comp)
+
+
+def fusion_comp_count(item) -> int:
+    """Fusion comps on a timeline item that do something: comps named rvs_neutral* are ignored.
+    Falls back to GetFusionCompCount when the name list is not available."""
+    try:
+        count = int(item.GetFusionCompCount() or 0)
+    except Exception:
+        return 0
+    if count == 0:
+        return 0
+    try:
+        names = item.GetFusionCompNameList()
+        if not isinstance(names, (list, tuple)):
+            raise TypeError(names)
+    except Exception:
+        return count
+    return sum(1 for n in names if not str(n).startswith(NEUTRAL_COMP))
+
+
 def export_plan(timeline) -> dict:
     """Read a Resolve timeline into a plan dict. Linked video+audio pairs become one item."""
     t0 = timeline.GetStartFrame()
@@ -206,10 +227,7 @@ def export_plan(timeline) -> dict:
         }
         if not it.GetClipEnabled():
             d["enabled"] = False
-        try:
-            comps = int(it.GetFusionCompCount() or 0)
-        except Exception:
-            comps = 0
+        comps = fusion_comp_count(it)
         if comps > 0:
             d["fusion_comps"] = comps
         return d, mpi
