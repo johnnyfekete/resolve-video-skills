@@ -20,7 +20,6 @@ from timeline import item_key
 SWIFT_SRC = Path(__file__).resolve().parent / "face_probe.swift"
 FRAME_WIDTH = 960
 HDR_TRANSFERS = ("arib-std-b67", "smpte2084")
-EXTENT_LOW, EXTENT_HIGH = 2.0, 98.0
 HAND_WRIST_MAX = 0.2   # a hand box centre this close to a body-pose wrist belongs to the speaker
 HAND_FACE_MAX = 0.5    # without wrists: a hand this close to the face belongs to the speaker
 RESTING = 0.93         # a hand box reaching this far down rests at the source's bottom edge
@@ -29,20 +28,17 @@ RESTING = 0.93         # a hand box reaching this far down rests at the source's
 # 3: the resting threshold moved from 0.98 to 0.93 of the source height.
 # 4: `extent_all`, the extent with resting hands counted (for setups marked bottom_hands: gesture).
 # 5: the resting filter applies to hand boxes only; head bottoms always count.
-MEASURE_VERSION = 5
+# 6: per-edge extent drops one frame (the single-frame outlier), not the 2nd/98th percentile.
+MEASURE_VERSION = 6
 
 
 # ---------------------------------------------------------------- summaries (pure)
 
-def _percentile(values: list[float], pct: float) -> float:
-    """Linear-interpolated percentile (numpy's default method)."""
-    s = sorted(values)
-    if len(s) == 1:
-        return s[0]
-    k = (len(s) - 1) * pct / 100.0
-    lo = int(k)
-    hi = min(lo + 1, len(s) - 1)
-    return s[lo] + (s[hi] - s[lo]) * (k - lo)
+def _edge(values: list[float], low: bool) -> float:
+    """The second-most-extreme value (the lowest for `low`, else the highest): one frame per edge,
+    the single-frame outlier, is dropped. With one value, that value."""
+    s = sorted(values, reverse=not low)
+    return s[1] if len(s) > 1 else s[0]
 
 
 def _dist(a, b) -> float:
@@ -74,9 +70,11 @@ def summarize(frames: list[dict]) -> dict:
     """One summary over a clip's frame detections.
 
     `detected` is the fraction of frames with a face. `eyes`, `face_h` and `joints_y` are medians over
-    the frames with a face only (the speaker may leave the shot). `extent` is the per-edge 2nd/98th
-    percentile over the head boxes and the speaker's hand boxes, so a gesture seen in a single frame
-    does not widen it. Hands count from every frame, including frames where a gesture hides the face.
+    the frames with a face only (the speaker may leave the shot). `extent` takes, per frame, the
+    speaker's extreme value per edge over the head box and the speaker's hand boxes, then per edge the
+    second-most-extreme frame: exactly one frame per edge is dropped, so a gesture seen in a single
+    frame does not widen it, and a gesture held for two frames or more does, however long the item.
+    Hands count from every frame, including frames where a gesture hides the face.
     A hand box whose bottom is at RESTING or lower rests at the source's bottom edge (on the knees or
     a table) and is already cut by the source: it counts for the left, right and top, not the bottom.
     `extent_all` is the same with every hand counting for the bottom too (a reach toward the lens
@@ -94,18 +92,26 @@ def summarize(frames: list[dict]) -> dict:
         if eyes_pts else None
     face_h = statistics.median(f["face"][3] - f["face"][1] for f in seen)
 
-    heads = [f["head"] for f in seen if f.get("head")]
-    hands = [h for f in frames for h in _speaker_hands(f)]
-    boxes = heads + hands
+    # Per frame: the speaker's extreme value per edge over that frame's head and hands.
+    lefts, tops, rights, lows, lows_all = [], [], [], [], []
+    for f in frames:
+        head = [f["head"]] if f.get("face") and f.get("head") else []
+        hands = _speaker_hands(f)
+        boxes = head + hands
+        if not boxes:
+            continue
+        lefts.append(min(b[0] for b in boxes))
+        tops.append(min(b[1] for b in boxes))
+        rights.append(max(b[2] for b in boxes))
+        lows_all.append(max(b[3] for b in boxes))
+        low = [b[3] for b in head] + [b[3] for b in hands if b[3] < RESTING]
+        if low:
+            lows.append(max(low))
     extent = extent_all = None
-    if boxes:
-        low = [b[3] for b in heads] + [b[3] for b in hands if b[3] < RESTING]
-        low = low or [b[3] for b in boxes]
-        extent = [_percentile([b[0] for b in boxes], EXTENT_LOW),
-                  _percentile([b[1] for b in boxes], EXTENT_LOW),
-                  _percentile([b[2] for b in boxes], EXTENT_HIGH),
-                  _percentile(low, EXTENT_HIGH)]
-        extent_all = extent[:3] + [_percentile([b[3] for b in boxes], EXTENT_HIGH)]
+    if lefts:
+        sides = [_edge(lefts, True), _edge(tops, True), _edge(rights, False)]
+        extent = sides + [_edge(lows or lows_all, False)]
+        extent_all = sides + [_edge(lows_all, False)]
 
     ys: dict[str, list[float]] = {}
     for f in seen:

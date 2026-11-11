@@ -50,6 +50,50 @@ class SummarizeTest(unittest.TestCase):
         self.assertAlmostEqual(s["extent"][2], HEAD[2])
         self.assertAlmostEqual(s["extent"][3], 0.75)
 
+    def test_short_gesture_in_a_long_item_sets_the_extent(self):
+        # 60 s at 4 fps: a 1 s gesture (4 frames) to x=0.85 is a real gesture, not an outlier.
+        hand = (0.75, 0.40, 0.85, 0.55)
+        near = {"neck": [0.5, 0.6], "right_wrist": [0.80, 0.50]}
+        frames = [frame() for _ in range(118)] + [frame(hands=[hand], joints=near) for _ in range(4)] \
+            + [frame() for _ in range(118)]
+        s = summarize(frames)
+        self.assertGreaterEqual(s["extent"][2], 0.85)
+        self.assertGreaterEqual(s["extent_all"][2], 0.85)
+
+    def test_single_frame_spike_in_a_long_item_dropped(self):
+        hand = (0.75, 0.40, 0.85, 0.55)
+        near = {"neck": [0.5, 0.6], "right_wrist": [0.80, 0.50]}
+        frames = [frame() for _ in range(120)] + [frame(hands=[hand], joints=near)] + [frame() for _ in range(119)]
+        s = summarize(frames)
+        self.assertAlmostEqual(s["extent"][2], HEAD[2])
+
+    def test_two_frame_gesture_kept(self):
+        hand = (0.02, 0.60, 0.10, 0.70)
+        near = {"neck": [0.5, 0.6], "left_wrist": [0.06, 0.70]}
+        frames = [frame() for _ in range(100)] + [frame(hands=[hand], joints=near) for _ in range(2)]
+        s = summarize(frames)
+        self.assertAlmostEqual(s["extent"][0], 0.02)
+        self.assertAlmostEqual(s["extent"][3], 0.70)
+
+    def test_each_edge_drops_its_own_single_frame_outlier(self):
+        # Two different frames, one spike each, inside the head's height: both edges drop theirs.
+        left = (0.02, 0.30, 0.10, 0.40)
+        right = (0.90, 0.30, 0.98, 0.40)
+        jl = {"neck": [0.5, 0.6], "left_wrist": [0.06, 0.40]}
+        jr = {"neck": [0.5, 0.6], "right_wrist": [0.94, 0.40]}
+        frames = [frame() for _ in range(50)] + [frame(hands=[left], joints=jl), frame(hands=[right], joints=jr)]
+        s = summarize(frames)
+        self.assertEqual([round(v, 6) for v in s["extent"]], HEAD)
+
+    def test_second_most_extreme_frame_per_edge(self):
+        # Frames reach x=0.70, 0.75 and 0.80 once each: the 0.80 frame is the outlier, 0.75 counts.
+        frames = [frame() for _ in range(30)]
+        for r in (0.70, 0.75, 0.80):
+            frames.append(frame(hands=[(r - 0.08, 0.40, r, 0.50)],
+                                joints={"neck": [0.5, 0.6], "right_wrist": [r - 0.04, 0.45]}))
+        s = summarize(frames)
+        self.assertAlmostEqual(s["extent"][2], 0.75)
+
     def test_hands_resting_at_the_source_bottom_do_not_set_the_bottom(self):
         rest = [(0.20, 0.85, 0.30, 0.99), (0.70, 0.85, 0.80, 1.0)]
         wrists = {"neck": [0.5, 0.6], "left_wrist": [0.25, 0.88], "right_wrist": [0.75, 0.88]}
