@@ -60,20 +60,30 @@ def _extract(path: str, start: float, end: float, stream: int, out: str) -> None
                     "-map", f"0:a:{stream}", "-ac", "1", "-ar", "16000", out], check=True)
 
 
+def cached(path: str, cache_dir: Path, *, stream: int = 0) -> dict | None:
+    """The cached transcript of `path` when it is still valid (same size, mtime and stream), else
+    None. Never runs Whisper."""
+    path = str(path)
+    cache = Path(cache_dir) / (hashlib.sha1(path.encode()).hexdigest() + ".json")
+    try:
+        st = os.stat(path)
+        data = json.loads(cache.read_text())
+    except (ValueError, OSError):
+        return None
+    if data.get("size") == st.st_size and data.get("mtime") == st.st_mtime and data.get("stream") == stream:
+        return data
+    return None
+
+
 def transcribe(path: str, cache_dir: Path, *, stream: int = 0,
                runner: Callable[[list[dict]], list[dict]] | None = None) -> dict:
     path = str(path)
     st = os.stat(path)
     cache_dir = Path(cache_dir)
     cache = cache_dir / (hashlib.sha1(path.encode()).hexdigest() + ".json")
-    if cache.exists():
-        try:
-            cached = json.loads(cache.read_text())
-            if cached.get("size") == st.st_size and cached.get("mtime") == st.st_mtime \
-                    and cached.get("stream") == stream:
-                return cached
-        except (ValueError, OSError):
-            pass
+    hit = cached(path, cache_dir, stream=stream)
+    if hit is not None:
+        return hit
     streams = audio_streams(path)
     if not streams:
         raise RuntimeError(f"No audio stream in {path}")

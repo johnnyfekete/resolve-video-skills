@@ -252,6 +252,57 @@ class PlainIssueTextTest(unittest.TestCase):
         self.assertIn("from a", eye[0]["detail"])
 
 
+class StalePushTest(unittest.TestCase):
+    """Push-ins are picked in timeline seconds; solve checks their text against the transcript."""
+
+    def setUp(self):
+        self._td = tempfile.TemporaryDirectory()
+        self.w = Workdir(Path(self._td.name))
+
+    def tearDown(self):
+        self._td.cleanup()
+
+    def _transcript(self, words):
+        import hashlib
+        path = str(self.w.a)
+        st = Path(path).stat()
+        cache = self.w.root / ".edit" / "framing" / "transcripts"
+        cache.mkdir(parents=True, exist_ok=True)
+        (cache / (hashlib.sha1(path.encode()).hexdigest() + ".json")).write_text(json.dumps({
+            "file": path, "size": st.st_size, "mtime": st.st_mtime, "stream": 0,
+            "words": [{"w": f" {w}", "start": a, "end": b} for w, a, b in words],
+            "segments": []}))
+
+    def test_push_whose_line_is_still_there_is_kept(self):
+        self._transcript([("This", 1.1, 1.4), ("is", 1.5, 1.7), ("the", 1.8, 2.0), ("whole", 2.1, 2.6),
+                          ("point.", 2.7, 3.4)])
+        self.w.decide()
+        code, out = self.w.solve()
+        self.assertEqual(code, 0, out)
+        self.assertEqual(len(self.w.solution()["pushes"]), 1)
+
+    def test_push_whose_line_moved_is_dropped_with_a_flag(self):
+        self._transcript([("Something", 1.1, 1.8), ("else", 1.9, 2.4), ("entirely.", 2.5, 3.4),
+                          ("This", 7.1, 7.4), ("is", 7.5, 7.7), ("the", 7.8, 8.0), ("whole", 8.1, 8.6),
+                          ("point.", 8.7, 9.4)])
+        self.w.decide()
+        code, out = self.w.solve()
+        self.assertEqual(code, 0, out)
+        sol = self.w.solution()
+        self.assertEqual(sol["pushes"], [])
+        stale = [f for f in sol["flags"] if "timeline changed since this line was picked: re-pick it" in f["text"]]
+        self.assertEqual(len(stale), 1, sol["flags"])
+        self.assertEqual(stale[0]["where"], "S01_A.MOV at 00:01.00")
+        self.assertIn("re-pick it", self.w.report())
+
+    def test_push_without_a_transcript_is_kept_and_the_report_says_so(self):
+        self.w.decide()
+        code, out = self.w.solve()
+        self.assertEqual(code, 0, out)
+        self.assertEqual(len(self.w.solution()["pushes"]), 1)
+        self.assertIn("not checked against the transcript", self.w.report().lower())
+
+
 class TranscriptTest(unittest.TestCase):
     def test_lines_map_source_time_to_timeline_time(self):
         plan = {"timeline": {"fps": 24.0}}

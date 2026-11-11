@@ -9,7 +9,9 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import tempfile
+from collections import Counter
 from pathlib import Path
 
 from timeline import item_key
@@ -117,6 +119,32 @@ def merge(old: dict, new_setups: dict[str, list[str]]) -> dict:
     out["push_ins"] = list(old.get("push_ins", []))
     out["issues"] = list(old.get("issues", []))
     return out
+
+
+_WORD = re.compile(r"[\w']+")
+
+
+def _norm(text: str) -> list[str]:
+    """Lower-case words without punctuation (curly apostrophes read as straight ones)."""
+    return _WORD.findall(text.lower().replace("\u2019", "'"))
+
+
+def push_still_matches(text: str, words, start_s: float, end_s: float, slack: float = 0.5,
+                       share: float = 0.6) -> bool:
+    """Whether a push-in's line is still said in its range (timeline seconds).
+
+    Push-ins are recorded in timeline seconds, so a timeline change after they were picked moves
+    the line away from its range. `words` are (start_s, end_s, word) in timeline seconds. The line
+    still matches when at least `share` of its words are heard within the range +- `slack`, in any
+    order (a repeated word must be heard as often). A line with no words always matches.
+    """
+    want = _norm(text)
+    if not want:
+        return True
+    heard = Counter(w for a, b, word in words if b > start_s - slack and a < end_s + slack
+                    for w in _norm(word))
+    found = sum(min(n, heard[w]) for w, n in Counter(want).items())
+    return found >= share * len(want) - 1e-9
 
 
 def match_key(item: dict) -> str:

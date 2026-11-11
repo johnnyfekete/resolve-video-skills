@@ -158,5 +158,31 @@ class BrollSetupAndIssuesTest(unittest.TestCase):
         self.assertEqual(merge(old, {"A": ["V1@0"]})["issues"], old["issues"])
 
 
+class PushStillMatchesTest(unittest.TestCase):
+    WORDS = [(10.0, 10.4, "Writing"), (10.5, 10.7, "is"), (10.8, 11.5, "thinking."),
+             (12.0, 12.3, "That's"), (12.4, 12.8, "the"), (12.9, 13.5, "point!")]
+
+    def test_same_words_with_other_case_and_punctuation_match(self):
+        self.assertTrue(decisions.push_still_matches("writing is THINKING, that's the point",
+                                                     self.WORDS, 10.0, 13.5))
+
+    def test_other_words_do_not_match(self):
+        self.assertFalse(decisions.push_still_matches("Nobody reads the second paragraph.",
+                                                      self.WORDS, 10.0, 13.5))
+
+    def test_sixty_percent_of_the_words_in_any_order_match(self):
+        # 3 of 5 words found (order ignored): enough. 2 of 5: not.
+        self.assertTrue(decisions.push_still_matches("thinking writing is quite hard", self.WORDS, 10.0, 13.5))
+        self.assertFalse(decisions.push_still_matches("thinking writing was quite hard", self.WORDS, 10.0, 13.5))
+
+    def test_words_half_a_second_outside_the_range_count(self):
+        self.assertTrue(decisions.push_still_matches("Writing is thinking.", self.WORDS, 10.45, 11.0))
+        self.assertFalse(decisions.push_still_matches("That's the point!", self.WORDS, 10.0, 11.3))
+
+    def test_repeated_words_need_repeats(self):
+        words = [(0.0, 0.5, "very"), (0.6, 1.0, "good")]
+        self.assertFalse(decisions.push_still_matches("very very very good", words, 0.0, 1.0))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -203,16 +203,15 @@ def _words(tr: dict) -> list[tuple[str, float, float]]:
     return out
 
 
-def transcript_lines(plan: dict, pieces: list[tuple[dict, str]], transcripts: dict) -> list[str]:
-    """`MM:SS.ss-MM:SS.ss <setup> <text>` per sentence heard on camera, in timeline time.
+def _piece_words(plan: dict, pieces: list[tuple[dict, str]], transcripts: dict) -> list[tuple[str, list]]:
+    """(setup id, [(start_s, end_s, word)]) per piece with a transcript, in timeline seconds.
 
     Each piece gets only the words whose middle lies in its own source window (100% speed), so a
     segment across a cut is not repeated. A word heard twice at the same timeline time (stacked
-    pieces of one source) is listed once. Lines break at sentence ends and at piece ends; the times
-    are those of the first and the last word.
+    pieces of one source) is listed once.
     """
     fps = float(plan["timeline"]["fps"])
-    rows, seen, cache = [], set(), {}
+    out, seen, cache = [], set(), {}
     for it, sid in pieces:
         path = it.get("path")
         tr = transcripts.get(path)
@@ -223,13 +222,7 @@ def transcript_lines(plan: dict, pieces: list[tuple[dict, str]], transcripts: di
         s0 = it["src_start"] / sf
         s1 = s0 + (it["end"] - it["start"]) / fps
         t0, t1 = it["start"] / fps, it["end"] / fps
-        cur: list[tuple[float, float, str]] = []
-
-        def flush():
-            if cur:
-                rows.append((cur[0][0], cur[-1][1], sid, " ".join(w for _, _, w in cur)))
-                cur.clear()
-
+        heard = []
         for w, a, b in words:
             if not s0 <= (a + b) / 2 < s1:
                 continue
@@ -237,18 +230,66 @@ def transcript_lines(plan: dict, pieces: list[tuple[dict, str]], transcripts: di
             if (path, round(ta, 2)) in seen:
                 continue
             seen.add((path, round(ta, 2)))
+            heard.append((ta, tb, w))
+        out.append((sid, heard))
+    return out
+
+
+def transcript_lines(plan: dict, pieces: list[tuple[dict, str]], transcripts: dict) -> list[str]:
+    """`MM:SS.ss-MM:SS.ss <setup> <text>` per sentence heard on camera, in timeline time.
+
+    Words per piece as `_piece_words` gives them. Lines break at sentence ends and at piece ends;
+    the times are those of the first and the last word.
+    """
+    rows = []
+    for sid, heard in _piece_words(plan, pieces, transcripts):
+        cur: list[tuple[float, float, str]] = []
+        for ta, tb, w in heard:
             cur.append((ta, tb, w))
             if _SENTENCE_END.search(w):
-                flush()
-        flush()
+                rows.append((cur[0][0], cur[-1][1], sid, " ".join(x for _, _, x in cur)))
+                cur = []
+        if cur:
+            rows.append((cur[0][0], cur[-1][1], sid, " ".join(x for _, _, x in cur)))
     rows.sort()
     return [f"{tc(a)}-{tc(b)} {sid} {text}" for a, b, sid, text in rows]
 
 
+def _transcript_cache(workdir: Path, fdir: Path) -> Path:
+    org = workdir / rvs.STATE_DIR / "organize" / "transcripts"
+    return org if org.is_dir() else fdir / "transcripts"
+
+
+STALE_PUSH = "timeline changed since this line was picked: re-pick it"
+
+
+def push_check(workdir: Path, plan: dict, items: list[dict], setup_of: dict):
+    """A checker for push-in lines against the current timeline's transcript (cached only, never
+    transcribes). check(push) is True (the line is still in its range), False (it is not: the
+    timeline changed since it was picked) or None (no transcript covers the range)."""
+    fdir, _ = _paths(workdir)
+    fps = float(plan["timeline"]["fps"])
+    pieces = _sound_pieces(plan, items, setup_of)
+    cache = _transcript_cache(workdir, fdir)
+    transcripts = {}
+    for path in sorted({p["path"] for p, _ in pieces if p.get("path")}):
+        tr = rvs_transcribe.cached(path, cache)
+        if tr is not None:
+            transcripts[path] = tr
+    words = [w for _, heard in _piece_words(plan, pieces, transcripts) for w in heard]
+
+    def check(p: dict) -> bool | None:
+        s, e = p["start_s"], p["end_s"]
+        over = [it for it, _ in pieces if it["start"] / fps < e and s < it["end"] / fps]
+        if not over or any(it.get("path") not in transcripts for it in over):
+            return None
+        return dec.push_still_matches(p.get("text", ""), words, s, e)
+    return check
+
+
 def write_transcript(workdir: Path, fdir: Path, plan: dict, cam: list[dict], setup_of: dict) -> Path:
     pieces = _sound_pieces(plan, cam, setup_of)
-    org = workdir / rvs.STATE_DIR / "organize" / "transcripts"
-    cache = org if org.is_dir() else fdir / "transcripts"
+    cache = _transcript_cache(workdir, fdir)
     transcripts, problems = {}, []
     paths = sorted({p["path"] for p, _ in pieces if p.get("path")})
     for n, path in enumerate(paths, 1):
@@ -491,13 +532,21 @@ def run_solve(s, opt, workdir: Path) -> dict:
 
     flags = [{**f, "setup": sid} for sid, res in results.items() for f in res["flags"]]
     push_ins = [] if no_push else list(data.get("push_ins", []))
-    kept_in = []
+    kept_in, unchecked = [], []
+    listed_of = {k: sid for sid, keys in setups.items() for k in keys}
+    check = push_check(workdir, plan, sorted(all_items, key=lambda i: (i["start"], i["track"])),
+                       listed_of) if push_ins else None
     for p in push_ins:
         s0, e0 = round(p["start_s"] * fps), round(p["end_s"] * fps)
         host = next((i for i in all_items if i["start"] <= s0 and e0 <= i["end"]), None)
         hk = item_key(host) if host else None
         why = None
-        if hk in hand:
+        heard = check(p)
+        if heard is None:
+            unchecked.append({"start_s": p["start_s"], "text": p.get("text", "")})
+        if heard is False:
+            why = STALE_PUSH
+        elif hk in hand:
             why = "the item is framed by hand and left alone"
         elif hk in unseen:
             why = "a higher track covers the speaker for the whole item"
@@ -541,6 +590,7 @@ def run_solve(s, opt, workdir: Path) -> dict:
                            "setup": next((x for x, keys in setups.items() if k in keys), None)}
                           for k in sorted(unseen, key=lambda k: (by_key[k]["start"], by_key[k]["track"]))]
     solution["issues"] = list(data.get("issues", []))
+    solution["push_unchecked"] = unchecked
     solution["cuts"] = cuts_used
     solution["on_camera_matches"] = sorted({dec.match_key(i) for i in _with_reclassify(plan, on_camera(plan), reclass)}
                                            | {dec.match_key(by_key[k]) for k in listed})
@@ -551,15 +601,15 @@ def run_solve(s, opt, workdir: Path) -> dict:
 
 
 def _flag_where(f: dict, by_key: dict, setups: dict, fps: float, video: list[dict]) -> str:
-    if f.get("key") in by_key:
-        return _where(by_key[f["key"]], fps)
     m = re.search(r"at (\d+(?:\.\d+)?)-", f["text"])
-    if m and f["text"].startswith("push-in"):
+    if m and f["text"].startswith("push-in"):   # a push-in's own line: its clip at the line's time
         fr = round(float(m.group(1)) * fps)
         it = max((i for i in video if i["start"] <= fr < i["end"]), key=lambda i: i["track"], default=None)
         if it:
             return f"{it.get('clip')} at {tc(fr / fps)}"
         return f"timeline at {tc(fr / fps)}"
+    if f.get("key") in by_key:
+        return _where(by_key[f["key"]], fps)
     keys = [k for k in setups.get(f.get("setup")) or [] if k in by_key]
     if keys:   # a setup-level flag: the setup's first clip on the timeline
         return _where(min((by_key[k] for k in keys), key=lambda i: (i["start"], i.get("track", 0))), fps)
@@ -762,6 +812,10 @@ def write_report(sol: dict, data: dict, path: Path, previews: dict) -> None:
                   if txt == p.get("text", "") and abs(s - p["start_s"]) < 1 / fps + 1e-6), None)
         L.append(f"- **{tc(p['start_s'])}-{tc(p['end_s'])}** \"{p.get('text', '')}\"")
         L.append(f"  - Why: {p.get('reason', '')}")
+        if any(u["text"] == p.get("text", "") and abs(u["start_s"] - p["start_s"]) < 1e-6
+               for u in sol.get("push_unchecked") or []):
+            L.append("  - Not checked against the transcript (none covers this range): if the "
+                     "timeline changed since the line was picked, it may no longer be said here")
         if k:
             L.append(f"  - Kept: {k['clip']}, {k['size']:.2f}x on the eyes")
         else:
