@@ -167,4 +167,5 @@ spline.SetKeyFrames({t0: {1: 1.00, "RH": {1: dt, 2: 0.0}},
 - **Comp length (VFR):** a 132-frame item of a 60 fps phone clip (330 source frames expected) gave a comp
   with `COMPN_RenderStart..COMPN_RenderEnd` = 0..327 (328 frames). `apply_resolve.py` compares that
   length to the item length in source frames after adding a push-in and raises an issue when they
-  differ by more than one frame; the push-in is kept.
+  differ by more than one timeline frame (the source-frame difference times timeline fps / source
+  fps; 2 source frames of a 60 fps clip on a 24 fps timeline is 0.8, not flagged); the push-in is kept.

@@ -136,6 +136,6 @@ These are what the scripts enforce. The reasons are here so you can judge shots 
 ## Not handled yet
 
 - Sources whose aspect differs from the timeline (4:3, vertical, square): the maths for them is derived, not measured. Check the previews and treat as unsupported.
-- Variable-frame-rate sources: a Fusion push-in can end a frame or two off. `apply` checks the comp length and raises an issue when it differs by more than one frame. Phone footage is often VFR, so check these by eye.
+- Variable-frame-rate sources: a Fusion push-in can end a frame or two off. `apply` checks the comp length and raises an issue when it differs from the item's length by more than one timeline frame (a source frame rate above the timeline's makes a source frame or two of difference normal rounding). Phone footage is often VFR, so check these by eye.
 - Retimed or speed-changed items: push-ins there are unverified.
 - Framing b-roll, stabilisation, vertical reframing (`video-shorts`) and colour or vignettes (`video-color`).

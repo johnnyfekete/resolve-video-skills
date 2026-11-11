@@ -421,7 +421,7 @@ class ApplyTest(unittest.TestCase):
         self.assertEqual(s.calls[-1], ("abandon",))
 
     PUSH = {"key": "V1@0", "comp_start": 5.0, "comp_end": 200.0, "comp_len": 600.0, "size": 1.06,
-            "pivot": [0.5, 0.3]}
+            "pivot": [0.5, 0.3], "src_fps": 60.0}
 
     def _apply(self, item, pushes, session=None):
         sol = _solution([0])
@@ -484,6 +484,25 @@ class ApplyTest(unittest.TestCase):
         s = FakeSession(FakeTimeline([item]))
         self._apply(item, [self.PUSH], s)
         self.assertFalse([i for i in s.issues if "push-in timing" in i[1]])
+
+    def test_comp_length_rounding_noise_is_not_flagged(self):
+        # 60 fps source on a 24 fps timeline: 2.5 source frames per timeline frame. 331 against
+        # 332.5 source frames is 0.6 of a timeline frame: rounding, not a variable frame rate.
+        item = FakeItem("S01_A.MOV", 86400)
+        s = FakeSession(FakeTimeline([item]))
+        push = {**self.PUSH, "comp_len": 332.5, "src_fps": 60.0}
+        with mock.patch.object(FakeComp, "render_end", 330.0):
+            self._apply(item, [push], s)
+        self.assertFalse([i for i in s.issues if "push-in timing" in i[1]], s.issues)
+
+    def test_comp_length_ten_frames_off_is_flagged(self):
+        item = FakeItem("S01_A.MOV", 86400)
+        s = FakeSession(FakeTimeline([item]))
+        push = {**self.PUSH, "comp_len": 332.0, "src_fps": 60.0}
+        with mock.patch.object(FakeComp, "render_end", 321.0):
+            self._apply(item, [push], s)
+        timing = [i for i in s.issues if "push-in timing" in i[1]]
+        self.assertEqual(len(timing), 1, s.issues)
 
     def test_applied_prunes_items_no_longer_on_camera(self):
         sol = _solution([0])

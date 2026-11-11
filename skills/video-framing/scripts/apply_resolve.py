@@ -195,16 +195,21 @@ def add_pushin(item, push: dict):
     return comp
 
 
-def _timing_flag(key: str, e: dict, push: dict, comp) -> list[dict]:
-    """A flag when the comp's length differs from the item's length in source frames by more than
-    one frame (variable frame rate sources): the push is kept, its timing may be off."""
+def _timing_flag(key: str, e: dict, push: dict, comp, tl_fps: float) -> list[dict]:
+    """A flag when the comp's length differs from the item's length by more than one timeline frame
+    (variable frame rate sources): the push is kept, its timing may be off. Lengths are in source
+    frames; the difference is converted to timeline frames, so rounding at a source frame rate
+    above the timeline's is not flagged."""
     want, got = push.get("comp_len"), _comp_length(comp)
-    if want is None or got is None or abs(got - float(want)) <= 1:
+    if want is None or got is None:
+        return []
+    src_fps = float(push.get("src_fps") or tl_fps)
+    if abs(got - float(want)) * tl_fps / src_fps <= 1:
         return []
     return [{"key": key, "setup": e.get("setup"),
              "where": f"{e['clip']} at {e.get('timecode', '')}".strip(),
-             "text": f"push-in timing: the Fusion comp of {e['clip']} is {got:.0f} source frames long, the "
-                     f"item {float(want):.0f}; the source may have a variable frame rate. Check that the "
+             "text": f"push-in timing: the Fusion comp of {e['clip']} is {got:.1f} source frames long, the "
+                     f"item {float(want):.1f}; the source may have a variable frame rate. Check that the "
                      f"push-in lands on its line"}]
 
 
@@ -232,6 +237,7 @@ def apply(session, solution: dict, applied_path=None) -> tuple[dict, list[dict]]
     applied_path = Path(applied_path) if applied_path else Path(session.dir) / "framing" / "applied.json"
     pending = applied_path.with_name(applied_path.name + ".pending")
     pushes = {p["key"]: p for p in solution.get("pushes", [])}
+    tl_fps = float((solution.get("timeline") or {}).get("fps") or 24.0)
     extra: list[dict] = []
     tl = session.begin_step("framing")
     try:
@@ -257,7 +263,7 @@ def apply(session, solution: dict, applied_path=None) -> tuple[dict, list[dict]]
                 if len(added) != 1:
                     raise ApplyError(f"could not tell which Fusion comp is the new push-in on {key}")
                 _rename(item, added[0], PUSH_COMP)
-                extra += _timing_flag(key, e, pushes[key], comp)
+                extra += _timing_flag(key, e, pushes[key], comp, tl_fps)
             _drop_comps(item, old)  # after the new comp exists: Resolve keeps an item's only comp
             holders = _with_tool(item)
             if holders != ([PUSH_COMP] if key in pushes else []):
