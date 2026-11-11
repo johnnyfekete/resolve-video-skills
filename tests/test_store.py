@@ -77,11 +77,35 @@ class IdTests(unittest.TestCase):
         json.dumps(result)
 
 
+class IssuedTests(unittest.TestCase):
+    def test_vanished_highest_number_not_reissued_across_runs(self):
+        shots = {"S02": {"/f/a.MOV": "A"}}
+        issued = {}
+        run1 = store.assign_ids([], [take("/f/a.MOV", "S02", float(i * 10), i * 10 + 4.0) for i in range(3)],
+                                shots, order_key=by_name, issued=issued)
+        self.assertEqual([t["id"] for t in run1], ["S02A-T01", "S02A-T02", "S02A-T03"])
+        self.assertEqual(issued, {"S02A": 3})
+        run2 = store.assign_ids(run1, [take("/f/a.MOV", "S02", 0.0, 4.0), take("/f/a.MOV", "S02", 10.0, 14.0)],
+                                shots, order_key=by_name, issued=issued)
+        self.assertEqual([t["id"] for t in run2], ["S02A-T01", "S02A-T02"])
+        run3 = store.assign_ids(run2, [t for t in [take("/f/a.MOV", "S02", 0.0, 4.0),
+                                                   take("/f/a.MOV", "S02", 10.0, 14.0),
+                                                   take("/f/a.MOV", "S02", 50.0, 54.0)]],
+                                shots, order_key=by_name, issued=issued)
+        self.assertEqual(run3[2]["id"], "S02A-T04")
+
+    def test_relabeled_scene_gets_new_id(self):
+        old = [old_take("S02A-T01", "/f/a.MOV", "S02", 1.0, 5.0)]
+        result = store.assign_ids(old, [take("/f/a.MOV", "S03", 1.0, 5.0)],
+                                  {"S03": {"/f/a.MOV": "A"}}, order_key=by_name)
+        self.assertEqual(result[0]["id"], "S03A-T01")
+
+
 class PickTests(unittest.TestCase):
     def data(self):
         old = [old_take("S02A-T01", "/f/a.MOV", "S02", 1.0, 5.0),
                old_take("S02A-T02", "/f/a.MOV", "S02", 10.0, 14.0)]
-        return {"schema": store.SCHEMA, "takes": old, "picks": {}, "shots": {}, "questions": []}
+        return {"schema": store.SCHEMA, "takes": old, "picks": {}, "shots": {}, "questions": [], "issued": {}}
 
     def test_pick_survives_rerun(self):
         data = store.apply_pick(self.data(), "S02A-T02")
@@ -118,23 +142,54 @@ class ShotLetterTests(unittest.TestCase):
     def scene(self, setup=None):
         return storyboard.Scene("S02", "text", setup=setup)
 
-    def test_shot_letters(self):
-        files = ["/f/1.MOV", "/f/2.MOV", "/f/3.MOV", "/f/4.MOV"]
-        ts = [take(f, "S02", 2.0, 6.0) for f in files]
-        diffs = iter([0.05, 0.5, 0.25])
+    def fake_diff(self, table):
         calls = []
 
         def fake(fa, ta, fb, tb):
             calls.append((fa, ta, fb, tb))
-            return next(diffs)
+            return table[frozenset((fa, fb))]
+        fake.calls = calls
+        return fake
 
+    def test_shot_letters(self):
+        f1, f2, f3, f4 = "/f/1.MOV", "/f/2.MOV", "/f/3.MOV", "/f/4.MOV"
+        ts = [take(f, "S02", 2.0, 6.0) for f in (f1, f2, f3, f4)]
+        fake = self.fake_diff({
+            frozenset((f1, f2)): 0.05,
+            frozenset((f1, f3)): 0.5, frozenset((f2, f3)): 0.5,
+            frozenset((f1, f4)): 0.6, frozenset((f3, f4)): 0.25,
+        })
         letters, questions = store.shot_letters(self.scene(), ts, fake, {})
-        self.assertEqual(letters, {"/f/1.MOV": "A", "/f/2.MOV": "A", "/f/3.MOV": "B", "/f/4.MOV": "B"})
+        self.assertEqual(letters, {f1: "A", f2: "A", f3: "B", f4: "B"})
         self.assertEqual(len(questions), 1)
         self.assertEqual(questions[0]["scene"], "S02")
-        self.assertEqual(questions[0]["files"], ["/f/3.MOV", "/f/4.MOV"])
+        self.assertEqual(questions[0]["files"], [f3, f4])
         self.assertEqual(questions[0]["diff"], 0.25)
-        self.assertEqual(calls[0], ("/f/1.MOV", 4.0, "/f/2.MOV", 4.0))  # middle of the take
+        self.assertEqual(fake.calls[0], (f1, 4.0, f2, 4.0))  # middle of the take
+
+    def test_returning_to_a_setup_reuses_its_letter(self):
+        f1, f2, f3 = "/f/1.MOV", "/f/2.MOV", "/f/3.MOV"
+        ts = [take(f, "S02", 2.0, 6.0) for f in (f1, f2, f3)]
+        fake = self.fake_diff({frozenset((f1, f2)): 0.6, frozenset((f1, f3)): 0.05,
+                               frozenset((f2, f3)): 0.6})
+        letters, questions = store.shot_letters(self.scene(), ts, fake, {})
+        self.assertEqual(letters, {f1: "A", f2: "B", f3: "A"})
+        self.assertEqual(questions, [])
+
+    def test_rerun_keeps_prior_letters(self):
+        f0, f1, f2 = "/f/0.MOV", "/f/1.MOV", "/f/2.MOV"
+        ts = [take(f, "S02", 2.0, 6.0) for f in (f0, f1, f2)]  # f0 filmed earlier, new
+        fake = self.fake_diff({frozenset((f0, f1)): 0.6, frozenset((f0, f2)): 0.05,
+                               frozenset((f1, f2)): 0.6})
+        prior = {f1: "A", f2: "B"}
+        letters, _ = store.shot_letters(self.scene(), ts, fake, {}, prior)
+        self.assertEqual(letters, {f1: "A", f2: "B", f0: "B"})
+
+    def test_new_file_unlike_all_letters_gets_next_unused(self):
+        f1, f2, f3 = "/f/1.MOV", "/f/2.MOV", "/f/3.MOV"
+        ts = [take(f, "S02", 2.0, 6.0) for f in (f1, f2, f3)]
+        letters, _ = store.shot_letters(self.scene(), ts, lambda *a: 0.9, {}, {f1: "A", f2: "C"})
+        self.assertEqual(letters[f3], "B")
 
     def test_one_file_many_takes_is_one_shot(self):
         ts = [take("/f/1.MOV", "S02", 2.0, 6.0), take("/f/1.MOV", "S02", 20.0, 24.0)]
@@ -159,7 +214,7 @@ class StoreFileTests(unittest.TestCase):
     def test_load_missing_is_empty_store(self):
         with tempfile.TemporaryDirectory() as d:
             data = store.load(Path(d))
-        self.assertEqual(data, {"schema": "rvs.takes/1", "takes": [], "picks": {}, "shots": {}, "questions": []})
+        self.assertEqual(data, {"schema": "rvs.takes/1", "takes": [], "picks": {}, "shots": {}, "questions": [], "issued": {}})
 
     def test_roundtrip(self):
         with tempfile.TemporaryDirectory() as d:

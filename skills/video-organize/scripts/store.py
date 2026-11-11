@@ -29,7 +29,7 @@ _ID = re.compile(r"^(S\w+?)([A-Z])-T(\d+)$")
 
 
 def empty() -> dict:
-    return {"schema": SCHEMA, "takes": [], "picks": {}, "shots": {}, "questions": []}
+    return {"schema": SCHEMA, "takes": [], "picks": {}, "shots": {}, "questions": [], "issued": {}}
 
 
 def load(dir: Path) -> dict:
@@ -85,14 +85,21 @@ def _overlap(a_start: float, a_end: float, b_start: float, b_end: float) -> floa
 
 
 def assign_ids(old: list[dict], new: list[Take], shots: dict,
-               order_key: Callable[[str], tuple] = filming_order) -> list[dict]:
+               order_key: Callable[[str], tuple] = filming_order,
+               issued: dict | None = None) -> list[dict]:
     """Return `new` as dicts with an `id`, reusing ids from `old`.
+
+    `issued` is the store's high-water mark per scene+shot ({"S02A": 3}). It is
+    read as the starting counters and updated in place with every number issued,
+    so the caller saves it (`data["issued"]`) and numbers never come back after
+    their take vanishes. An id is inherited only by a take in the same scene and
+    file overlapping the old one.
 
     Unmatched takes (no scene) are kept in the output with `id` None and take no
     part in numbering. Old takes that no longer exist are dropped, but their
     numbers are never issued again.
     """
-    counters: dict[str, int] = {}  # "S02A" -> highest number issued so far
+    counters: dict[str, int] = dict(issued or {})  # "S02A" -> highest number issued so far
     for t in old:
         m = _ID.match(t.get("id") or "")
         if m:
@@ -106,7 +113,7 @@ def assign_ids(old: list[dict], new: list[Take], shots: dict,
             continue
         best, best_share = None, 0.0
         for o in old:
-            if not o.get("id") or o["id"] in claimed or o["file"] != t.file:
+            if not o.get("id") or o["id"] in claimed or o["file"] != t.file or o.get("scene") != t.scene:
                 continue
             share = _overlap(t.start, t.end, o["start"], o["end"])
             if share >= INHERIT_OVERLAP and share > best_share:
@@ -125,6 +132,8 @@ def assign_ids(old: list[dict], new: list[Take], shots: dict,
         counters[key] = counters.get(key, 0) + 1
         ids[i] = f"{key}-T{counters[key]:02d}"
 
+    if issued is not None:
+        issued.update(counters)
     result = []
     for i, t in enumerate(new):
         d = asdict(t)
@@ -151,40 +160,48 @@ def frame_diff(file_a: str, t_a: float, file_b: str, t_b: float) -> float:
 
 
 def shot_letters(scene: Scene, takes: list[Take], frame_diff: Callable[[str, float, str, float], float],
-                 setup_letters: dict) -> tuple[dict, list[dict]]:
+                 setup_letters: dict, prior: dict | None = None) -> tuple[dict, list[dict]]:
     """Letter every file of a scene's takes: {file: letter} and questions.
 
-    Files are compared in the order they first appear in `takes` (pass them in
-    filming order), each against the file before it, at the middle of its first
-    take. A clear difference starts the next letter; a borderline one keeps the
-    letter and asks. A scene whose `setup` was seen before starts on that
-    setup's letter. `setup_letters` ({setup: letter}) is updated in place.
+    A letter means a camera setup. Files in `prior` ({file: letter}, from the
+    store) keep their letter. Each other file, taken in order of first appearance,
+    is compared at the middle of its first take with one representative file per
+    existing letter; the lowest diff decides: below 0.2 that letter, 0.2 to 0.35
+    that letter plus a question {scene, files: [representative, file], diff},
+    0.35 or more the next unused letter. With no letters yet, a scene whose
+    `setup` was seen before starts on that setup's letter, else A.
+    `setup_letters` ({setup: letter}) is updated in place.
     """
     first: dict[str, Take] = {}
     for t in takes:
         if t.file not in first or t.start < first[t.file].start:
             first[t.file] = t
-    files = list(first)
-    if not files:
-        return {}, []
+    letters: dict[str, str] = {f: l for f, l in (prior or {}).items() if f in first}
+    reps: dict[str, str] = {}  # letter -> representative file
+    for f in first:
+        if f in letters:
+            reps.setdefault(letters[f], f)
 
     def middle(f: str) -> float:
         return (first[f].start + first[f].end) / 2
 
-    start_letter = setup_letters.get(scene.setup, "A") if scene.setup else "A"
-    letters = {files[0]: start_letter}
     questions: list[dict] = []
-    current = start_letter
-    for prev, f in zip(files, files[1:]):
-        diff = frame_diff(prev, middle(prev), f, middle(f))
-        if diff >= NEW_SHOT_DIFF:
-            used = set(letters.values())
-            current = next(c for c in string.ascii_uppercase if c > current and c not in used)
-        elif diff >= QUESTION_DIFF:
-            questions.append({"scene": scene.id, "files": [prev, f], "diff": round(diff, 3)})
-        letters[f] = current
-    if scene.setup:
-        setup_letters.setdefault(scene.setup, letters[files[0]])
+    for f in first:
+        if f in letters:
+            continue
+        if not reps:
+            letter = setup_letters.get(scene.setup, "A") if scene.setup else "A"
+        else:
+            diff, letter, rep = min((frame_diff(r, middle(r), f, middle(f)), l, r) for l, r in reps.items())
+            if diff >= NEW_SHOT_DIFF:
+                used = set(reps)
+                letter = next(c for c in string.ascii_uppercase if c not in used)
+            elif diff >= QUESTION_DIFF:
+                questions.append({"scene": scene.id, "files": [rep, f], "diff": round(diff, 3)})
+        letters[f] = letter
+        reps.setdefault(letter, f)
+    if scene.setup and letters:
+        setup_letters.setdefault(scene.setup, letters[next(iter(first))])
     return letters, questions
 
 
