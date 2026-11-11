@@ -206,6 +206,12 @@ def export_plan(timeline) -> dict:
         }
         if not it.GetClipEnabled():
             d["enabled"] = False
+        try:
+            comps = int(it.GetFusionCompCount() or 0)
+        except Exception:
+            comps = 0
+        if comps > 0:
+            d["fusion_comps"] = comps
         return d, mpi
 
     def audio_mapping(it):
@@ -270,7 +276,8 @@ def export_plan(timeline) -> dict:
 # src_end is left out on purpose: with high-fps sources Resolve rounds it by up to one source frame
 # (under half a timeline frame). Source start + timeline length pin the edit exactly.
 _CMP_KEYS = ("media", "track", "audio_track", "path", "clip", "start", "end", "src_start",
-             "enabled", "props", "audio_props", "fades", "audio_fades", "audio_mapping")
+             "enabled", "props", "audio_props", "fades", "audio_fades", "audio_mapping",
+             "fusion_comps")
 
 
 def _norm(d: dict) -> tuple:
@@ -621,7 +628,7 @@ class Session:
         self._save_state()
         return p
 
-    def build(self, plan: dict, step: str, summary: str) -> dict:
+    def build(self, plan: dict, step: str, summary: str, allow_fusion_loss: bool = False) -> dict:
         """Rebuild: create a new timeline from a plan (structural steps). Refuses on unrecorded hand edits."""
         self._require_state()
         if self.state.get("pending"):
@@ -632,6 +639,11 @@ class Session:
                            "\n  ".join(changes[:20]) +
                            "\nRun: rvs.py sync   then make the new plan from the synced plan, so those edits are kept.")
         src_plan = self.load_plan()
+        fusion = [d for d in src_plan.get("items", []) if d.get("fusion_comps")]
+        if fusion and not allow_fusion_loss:
+            raise RvsError("A build would drop Fusion comps (push-ins, effects) on:\n  " +
+                           "\n  ".join(f"{_where(d)} ({d['fusion_comps']} comp(s))" for d in fusion[:20]) +
+                           "\nUse a fork instead, or pass --allow-fusion-loss to rebuild without them.")
         if src_plan.get("unsupported"):
             print(f"warning: {len(src_plan['unsupported'])} non-media items (titles, generators...) on the current "
                   "timeline are not rebuilt. They stay on the archived version.", file=sys.stderr)
@@ -844,6 +856,8 @@ def main(argv=None):
     bl.add_argument("plan")
     bl.add_argument("--step", required=True)
     bl.add_argument("--summary", required=True)
+    bl.add_argument("--allow-fusion-loss", action="store_true",
+                    help="build even though Fusion comps on the current timeline will be dropped")
     args = ap.parse_args(argv)
 
     try:
@@ -906,7 +920,7 @@ def main(argv=None):
             print(f"{args.step} is back in the pipeline")
         elif args.cmd == "build":
             plan = json.loads(Path(args.plan).read_text())
-            entry = s.build(plan, args.step, args.summary)
+            entry = s.build(plan, args.step, args.summary, allow_fusion_loss=args.allow_fusion_loss)
             print(f"v{entry['version']:02d} saved: {entry['timeline']}")
     except RvsError as e:
         print(f"error: {e}", file=sys.stderr)
