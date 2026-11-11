@@ -17,6 +17,8 @@ import apply_resolve  # noqa: E402
 import decisions  # noqa: E402
 import framing  # noqa: E402
 import measure  # noqa: E402
+import preview  # noqa: E402
+from geometry import Rect  # noqa: E402
 
 FPS = 24.0
 
@@ -68,6 +70,10 @@ class Workdir:
         mdir.mkdir(parents=True)
         for it in self.items:
             (mdir / measure._cache_name(it, Path(it["path"]))).write_text(json.dumps(MEASURE))
+
+    def add_video(self, item):
+        self.items.append(item)
+        (self.root / ".edit" / "plans" / "v01_adopt.json").write_text(json.dumps(self.plan))
 
     def decide(self, label_b="dynamic", push_ins=(PUSH,)):
         d = decisions.template({"A": ["V1@0", "V1@240"], "B": ["V1@480", "V1@720"]})
@@ -189,8 +195,28 @@ class TranscriptTest(unittest.TestCase):
                            {"text": "Hello there.", "start": 26.0, "end": 28.5},
                            {"text": "Cut in half", "start": 34.0, "end": 37.0}]}
         lines = framing.transcript_lines(plan, [(it, "A")], {"/x.mov": tr})
+        # Without word times, words are spread over their segment: only "Cut" is inside the item.
         self.assertEqual(lines, ["00:11.00-00:13.50 A Hello there.",
-                                 "00:19.00-00:20.00 A Cut in half"])
+                                 "00:19.00-00:20.00 A Cut"])
+
+    WORDS = [("Hello", 0.5, 0.9), ("there.", 1.0, 1.4), ("How", 1.6, 1.9), ("are", 2.0, 2.2),
+             ("you?", 2.3, 2.8), ("Fine.", 3.2, 3.6), ("Thanks", 4.0, 4.5), ("a", 4.6, 4.7),
+             ("lot!", 4.8, 5.2)]
+
+    def test_words_split_by_piece_and_sentence_without_repeats(self):
+        plan = {"timeline": {"fps": 24.0}}
+        tr = {"words": [{"w": f" {w}", "start": a, "end": b} for w, a, b in self.WORDS],
+              "segments": [{"text": "Hello there. How are you? Fine. Thanks a lot!", "start": 0.4,
+                            "end": 5.3}]}
+        one = {"start": 240, "end": 312, "src_start": 0, "src_end": 72, "path": "/x.mov", "track": 1}
+        two = {"start": 312, "end": 384, "src_start": 72, "src_end": 144, "path": "/x.mov", "track": 1}
+        stacked = {**two, "track": 2}  # the same sound under a voiceover split: heard once
+        lines = framing.transcript_lines(plan, [(one, "A"), (two, "A"), (stacked, "A")],
+                                         {"/x.mov": tr})
+        self.assertEqual(lines, ["00:10.50-00:11.40 A Hello there.",
+                                 "00:11.60-00:12.80 A How are you?",
+                                 "00:13.20-00:13.60 A Fine.",
+                                 "00:14.00-00:15.20 A Thanks a lot!"])
 
 
 # ---------------------------------------------------------------- apply with fake Resolve objects
@@ -459,12 +485,204 @@ class ApplyTest(unittest.TestCase):
         self.assertEqual(list(item.comps), ["Composition 1", "rvs_pushin"])
         self.assertIsNone(item.comps["Composition 1"].FindTool("rvs_pushin"))
 
-    def test_refuses_wrong_scaling_mode(self):
+    def _tl(self, mode):
         class TL:
             def GetSetting(self, k):
-                return "scaleToFit" if k == "timelineInputResMismatchBehavior" else ""
+                return mode if k == "timelineInputResMismatchBehavior" else ""
+        return TL()
+
+    def test_refuses_wrong_scaling_mode(self):
         with self.assertRaisesRegex(Exception, "scale full frame with crop"):
-            apply_resolve.check_scaling(TL(), None)
+            apply_resolve.check_scaling(self._tl("centerCrop"), None, {"a.mov": (3840, 2160)}, (1920, 1080))
+
+    def test_scale_to_fit_accepted_at_matching_aspect(self):
+        for size in ((3840, 2160), (1920, 1080), (3840, 2165)):
+            apply_resolve.check_scaling(self._tl("scaleToFit"), None, {"a.mov": size}, (1920, 1080))
+        apply_resolve.check_scaling(self._tl("scaleToCrop"), None, {"a.mov": (1440, 1080)}, (1920, 1080))
+
+    def test_scale_to_fit_refused_naming_the_other_aspect_clip(self):
+        with self.assertRaisesRegex(apply_resolve.ApplyError, "IMG_43.MOV") as cm:
+            apply_resolve.check_scaling(self._tl("scaleToFit"), None,
+                                        {"a.mov": (3840, 2160), "IMG_43.MOV": (1440, 1080)}, (1920, 1080))
+        self.assertNotIn("a.mov", str(cm.exception))
+        with self.assertRaisesRegex(apply_resolve.ApplyError, "b.mov"):
+            apply_resolve.check_scaling(self._tl("scaleToFit"), None, {"b.mov": (3840, 2180)}, (1920, 1080))
+
+    def test_agent_issues_added_after_finish(self):
+        item = FakeItem("S01_A.MOV", 86400)
+        s = FakeSession(FakeTimeline([item]))
+        sol = _solution([0])
+        sol["issues"] = [{"text": "The plant goes with the lamp: unsure", "where": "S16_X.MOV at 02:03.00"}]
+        with tempfile.TemporaryDirectory() as td:
+            _, added = apply_resolve.apply(s, sol, Path(td) / "applied.json")
+        self.assertIn(("framing", "The plant goes with the lamp: unsure", "S16_X.MOV at 02:03.00"), s.issues)
+        self.assertEqual(len(added), 2)
+
+
+class HiddenUnderBrollTest(unittest.TestCase):
+    def setUp(self):
+        self._td = tempfile.TemporaryDirectory()
+        self.w = Workdir(Path(self._td.name))
+
+    def tearDown(self):
+        self._td.cleanup()
+
+    def test_item_fully_under_broll_is_not_framed_or_flagged_and_reported(self):
+        self.w.add_video({"clip": "IMG_9.MOV", "path": "/m/IMG_9.MOV", "start": 230, "end": 490,
+                          "src_start": 0, "src_end": 260, "media": "video", "track": 2})
+        self.w.decide()
+        with mock.patch.dict(MEASURE, {"detected": 0.2}):  # every framed item gets a flag
+            for it in self.w.items[:4]:
+                p = self.w.root / ".edit" / "framing" / "measure" / measure._cache_name(it, Path(it["path"]))
+                p.write_text(json.dumps(MEASURE))
+            code, out = self.w.solve()
+        self.assertEqual(code, 0, out)
+        sol = self.w.solution()
+        self.assertNotIn("V1@240", sol["items"])
+        self.assertIn("V1@0", sol["items"])
+        self.assertFalse([f for f in sol["flags"] if f["key"] == "V1@240" or "00:10.00" in f["where"]],
+                         sol["flags"])
+        self.assertEqual([h["key"] for h in sol["hidden"]], ["V1@240"])
+        report = self.w.report()
+        self.assertIn("hidden under b-roll (left as is)", report.lower())
+        self.assertIn("V1@240", report.split("idden under b-roll", 1)[1])
+
+
+class MergeFlagsTest(unittest.TestCase):
+    def test_punch_skips_merge_per_setup_and_duplicates_collapse(self):
+        g = "punch-in skipped: even 1.10x would cut a gesture"
+        j = "punch-in skipped: even 1.10x would put the bottom edge on a joint"
+        sliver = "clutter sliver at frame edge: keep-out (0.87, 0.30, 1.00, 0.76) shows as a thin strip"
+        flags = [
+            {"key": "V1@10", "setup": "J", "text": g, "where": "S25_A.MOV at 02:59.67",
+             "attempt": {"cx": 0.5, "cy": 0.5, "w": 0.5, "aspect": 1.7778}},
+            {"key": "V1@20", "setup": "J", "text": j, "where": "S25_A.MOV at 03:01.12"},
+            {"key": "V1@30", "setup": "J", "text": g, "where": "S26_A.MOV at 03:07.46"},
+            {"key": "V1@40", "setup": "B", "text": g, "where": "S02_B.MOV at 00:23.50"},
+            {"key": "V1@1", "setup": "B", "text": sliver, "where": "S02_B.MOV at 00:14.00"},
+            {"key": "V1@2", "setup": "B", "text": sliver, "where": "S04_B.MOV at 00:29.00"},
+            {"key": "V1@3", "setup": "C", "text": sliver, "where": "S08_C.MOV at 00:55.00"},
+            {"key": None, "setup": "D", "text": "other", "where": "setup D: S12.MOV at 01:00.00"},
+        ]
+        out = framing.merge_flags(flags)
+        texts = [f["text"] for f in out]
+        self.assertEqual(len(out), 5, texts)
+        pj = next(f for f in out if f["setup"] == "J")
+        self.assertTrue(pj["text"].startswith("3 punch-ins skipped on setup J: "), pj["text"])
+        self.assertIn("would cut a gesture (2x)", pj["text"])
+        self.assertIn("would put the bottom edge on a joint (1x)", pj["text"])
+        self.assertIn("03:07.46", pj["text"])
+        self.assertEqual(pj["where"], "S25_A.MOV at 02:59.67")
+        self.assertEqual(pj["key"], "V1@10")
+        self.assertEqual(pj["attempt"], flags[0]["attempt"])
+        pb = next(f for f in out if f["setup"] == "B" and "punch" in f["text"])
+        self.assertTrue(pb["text"].startswith("1 punch-in skipped on setup B: "), pb["text"])
+        sb = [f for f in out if f["setup"] == "B" and "sliver" in f["text"]]
+        self.assertEqual(len(sb), 1)
+        self.assertIn("S04_B.MOV at 00:29.00", sb[0]["text"])
+        self.assertEqual(sb[0]["where"], "S02_B.MOV at 00:14.00")
+        self.assertEqual(len([f for f in out if "sliver" in f["text"]]), 2)  # per setup only
+        for f in out:
+            self.assertRegex(f["where"], r"\.MOV at \d\d:\d\d\.\d\d")
+
+
+class AgentIssuesAndScalingCliTest(unittest.TestCase):
+    def setUp(self):
+        self._td = tempfile.TemporaryDirectory()
+        self.w = Workdir(Path(self._td.name))
+
+    def tearDown(self):
+        self._td.cleanup()
+
+    def test_issues_go_into_solution_and_report(self):
+        self.w.decide()
+        d = json.loads((self.w.root / ".edit" / "framing" / "decisions.json").read_text())
+        d["issues"] = [{"text": "Lamp or plant: unsure", "where": "S01_A.MOV at 00:00.00"}]
+        decisions.save(self.w.root / ".edit" / "framing" / "decisions.json", d)
+        code, out = self.w.solve()
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.w.solution()["issues"], d["issues"])
+        self.assertIn("Lamp or plant: unsure", self.w.report())
+
+    def _apply(self, sizes, mode="scaleToFit"):
+        from rvs import Session
+        s = Session(self.w.root, connect_now=False)
+        s.project = object()
+        s.check = lambda: []
+
+        class TL:
+            def GetSetting(self, k):
+                return mode if k == apply_resolve.SCALING_KEY else ""
+        s.current_timeline = lambda: TL()
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(framing, "_session", return_value=s), \
+                mock.patch.object(framing, "source_size", side_effect=lambda p: sizes[str(p)]), \
+                mock.patch.object(framing, "write_previews", return_value={}), \
+                mock.patch.object(apply_resolve, "apply", return_value=({"version": 2, "timeline": "T_v02"}, [])) as ap, \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = framing.main(["apply", "--workdir", str(self.w.root)])
+        return code, out.getvalue() + err.getvalue(), ap
+
+    def test_apply_accepts_scale_to_fit_at_matching_aspect(self):
+        self.w.decide()
+        code, out, ap = self._apply({str(self.w.a): (3840, 2160), str(self.w.b): (1920, 1080)})
+        self.assertEqual(code, 0, out)
+        self.assertTrue(ap.called)
+
+    def test_apply_refuses_scale_to_fit_naming_the_mismatched_clip(self):
+        self.w.decide()
+        code, out, ap = self._apply({str(self.w.a): (3840, 2160), str(self.w.b): (1440, 1080)})
+        self.assertEqual(code, 2, out)
+        self.assertIn("S02_B.MOV", out)
+        self.assertNotIn("S01_A.MOV", out.split("error:", 1)[1])
+        self.assertFalse(ap.called)
+
+    def test_prepare_side_warning(self):
+        from rvs import Session
+        s = Session(self.w.root, connect_now=False)
+        s.project = object()
+
+        class TL:
+            def GetSetting(self, k):
+                return "scaleToFit"
+        s.current_timeline = lambda: TL()
+        sizes = {str(self.w.a): (3840, 2160), str(self.w.b): (1440, 1080)}
+        with mock.patch.object(framing, "source_size", side_effect=lambda p: sizes[str(p)]):
+            msg = framing.scaling_warning(s, self.w.plan, {})
+            self.assertIn("S02_B.MOV", msg)
+            sizes[str(self.w.b)] = (3840, 2160)
+            self.assertIsNone(framing.scaling_warning(s, self.w.plan, {}))
+        s.project = None
+        self.assertIsNone(framing.scaling_warning(s, self.w.plan, {}))
+
+
+class PreviewAttemptTest(unittest.TestCase):
+    def test_flag_preview_draws_the_attempt(self):
+        att = {"cx": 0.5, "cy": 0.45, "w": 0.55, "aspect": 1.7778}
+        sol = {"setups": {"A": {"rect": {"cx": 0.5, "cy": 0.45, "w": 0.6, "aspect": 1.7778},
+                                "items": ["V1@0"], "keep_out": [], "keep_in": [], "label": "plain",
+                                "zoom": 1.6}},
+               "items": {"V1@0": {"rect": {"cx": 0.5, "cy": 0.45, "w": 0.6, "aspect": 1.7778}}},
+               "pushes": [],
+               "flags": [{"key": "V1@0", "setup": "A", "text": "1 punch-in skipped", "where": "x at 00:00.00",
+                          "attempt": att}]}
+        plan = {"items": [{"clip": "a", "path": "/a", "media": "both", "track": 1, "start": 0, "end": 10}]}
+        with tempfile.TemporaryDirectory() as td, \
+                mock.patch.object(preview, "available", return_value=True), \
+                mock.patch.object(framing, "item_frame", return_value=Path(td) / "f.jpg"), \
+                mock.patch.object(preview, "before_after", side_effect=lambda *a, **k: a[2]) as ba:
+            framing.write_previews(Path(td), plan, sol, {})
+        flag_call = ba.call_args_list[-1]
+        self.assertEqual(flag_call.kwargs["attempt"], Rect(0.5, 0.45, 0.55, 1.7778))
+
+    def test_before_after_draws_attempt_in_another_colour(self):
+        seen = []
+        with mock.patch.object(preview, "_run", side_effect=lambda args, what: seen.append(args)):
+            preview.before_after("/f.jpg", Rect(0.5, 0.5, 0.8), "/tmp/x.jpg",
+                                 attempt=Rect(0.5, 0.5, 0.7))
+        graph = " ".join(seen[0])
+        self.assertIn("color=lime", graph)
+        self.assertIn("color=orange", graph)
 
 
 if __name__ == "__main__":

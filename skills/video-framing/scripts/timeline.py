@@ -7,6 +7,8 @@ from __future__ import annotations
 import re
 
 _PREFIX_RE = re.compile(r"^(?:S\d+_)+")
+_BROLL_TRACK = re.compile(r"b[- ]?roll", re.IGNORECASE)   # "B-roll", "broll", "b roll"
+_BROLL_FILE = re.compile(r"b-?roll", re.IGNORECASE)       # "broll", "b-roll"
 
 
 def item_key(d: dict) -> str:
@@ -30,17 +32,35 @@ def _overlaps(a: dict, b: dict) -> bool:
     return a["start"] < b["end"] and b["start"] < a["end"]
 
 
+def _broll_tracks(plan: dict) -> set[int]:
+    """Video track indexes whose name says b-roll."""
+    tracks = (plan.get("tracks") or {}).get("video") or []
+    return {t["index"] for t in tracks if _BROLL_TRACK.search(t.get("name") or "")}
+
+
+def _broll_file(it: dict) -> bool:
+    names = [it.get("clip") or "", (it.get("path") or "").rsplit("/", 1)[-1]]
+    return any(_BROLL_FILE.search(n) for n in names)
+
+
 def on_camera(plan: dict) -> list[dict]:
     """Every `both` video item, plus video-only items whose sound is found.
 
     A video-only item counts when an overlapping audio or `both` item has a
-    matching shot prefix (token sets intersect) or the same path.
+    matching shot prefix (token sets intersect) or the same path. B-roll by name
+    never counts: a file whose name contains "broll" or "b-roll", or a video-only
+    item on a track whose name contains "b-roll", "broll" or "b roll".
     """
     items = plan.get("items", [])
     sound = [i for i in items if i.get("media") in ("audio", "both")]
+    broll_tracks = _broll_tracks(plan)
     out = []
     for it in items:
         media = it.get("media")
+        if media in ("video", "both") and _broll_file(it):
+            continue
+        if media == "video" and it.get("track") in broll_tracks:
+            continue
         if media == "both":
             out.append(it)
         elif media == "video":
@@ -65,6 +85,28 @@ def _top_at(items: list[dict], frame: int) -> dict | None:
     return best
 
 
+def _enabled_video(plan: dict) -> list[dict]:
+    return [i for i in plan.get("items", [])
+            if i.get("media") in ("video", "both") and i.get("track") is not None
+            and i.get("enabled", True) is not False]
+
+
+def hidden(plan: dict, cam_items: list[dict]) -> set[str]:
+    """`item_key`s of items the viewer never sees: at no frame are they the top item (`_top_at`).
+
+    The top item only changes where some item starts or ends, so checking the item's first frame
+    and every start or end inside it covers every frame.
+    """
+    video = _enabled_video(plan)
+    out = set()
+    for it in cam_items:
+        a, b = it["start"], it["end"]
+        frames = {a} | {f for v in video for f in (v["start"], v["end"]) if a < f < b}
+        if all(_top_at(video, f) is not it for f in frames):
+            out.add(item_key(it))
+    return out
+
+
 def visible_cuts(plan: dict, cam_items: list[dict],
                  setup_of: dict[str, str]) -> list[tuple[str, str]]:
     """Pairs (key_a, key_b) of adjacent same-setup items with a visible cut.
@@ -75,9 +117,7 @@ def visible_cuts(plan: dict, cam_items: list[dict],
     Only those two frames matter. Items whose key is missing from `setup_of`
     are skipped silently: they form no cuts.
     """
-    video = [i for i in plan.get("items", [])
-             if i.get("media") in ("video", "both") and i.get("track") is not None
-             and i.get("enabled", True) is not False]
+    video = _enabled_video(plan)
     by_start: dict[int, list[dict]] = {}
     for it in cam_items:
         by_start.setdefault(it["start"], []).append(it)

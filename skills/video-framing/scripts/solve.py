@@ -37,6 +37,8 @@ class Opts:
     face_h_max: float = 0.28       # of frame height
     joint_clear: float = 0.03      # of frame height
     fast_move: float = 0.60        # gesture extent wider than this of the frame: no push-in
+    push_min_s: float = 3.0        # push-in line length range, seconds
+    push_max_s: float = 8.0
     aspect: float = 16 / 9         # source aspect (width / height)
 
 
@@ -557,20 +559,34 @@ def _grown(ext: Box, r: Rect, opts: Opts) -> Box:
     return max(0.0, l - mx), max(0.0, t - my), min(1.0, rt + mx), min(1.0, b + my)
 
 
+def _zoom_check(base: Rect, m: dict, f: float, keep_out, keep_in, opts: Opts) -> tuple[Rect, list[str]]:
+    """base zoomed in by f around the eyes, and every reason it cannot ship (empty when it can)."""
+    r = base.scaled(f, anchor=tuple(m["eyes"]))
+    why = []
+    if not r.inside_source():
+        why.append("show outside the source")
+    if not r.contains(_grown(_extent(m), r, opts)):
+        why.append("cut a gesture")
+    joints = sorted((m.get("joints_y") or {}).values())
+    if _on_joint(r, joints, opts) and not _on_joint(base, joints, opts):
+        why.append("put the bottom edge on a joint")
+    if _cuts(r, keep_in) > _cuts(base, keep_in):
+        why.append("cut set dressing at the edge")
+    if len(_slivers(r, keep_out)) > len(_slivers(base, keep_out)):
+        why.append("leave a clutter sliver at the edge")
+    return r, why
+
+
+def _why(reasons: list[str]) -> str:
+    return ", ".join(reasons[:-1]) + (" and " if len(reasons) > 1 else "") + reasons[-1]
+
+
 def _zoomed(base: Rect, m: dict, f: float, keep_out, keep_in, opts: Opts) -> Rect | None:
     """base zoomed in by f around the eyes, or None if that clips a gesture, shows outside the
     source, cuts set dressing, leaves a clutter sliver or puts the bottom edge on a joint where
     the base frame did not."""
-    r = base.scaled(f, anchor=tuple(m["eyes"]))
-    if not r.inside_source() or not r.contains(_grown(_extent(m), r, opts)):
-        return None
-    joints = sorted((m.get("joints_y") or {}).values())
-    if _on_joint(r, joints, opts) and not _on_joint(base, joints, opts):
-        return None
-    if _cuts(r, keep_in) > _cuts(base, keep_in) or \
-            len(_slivers(r, keep_out)) > len(_slivers(base, keep_out)):
-        return None
-    return r
+    r, why = _zoom_check(base, m, f, keep_out, keep_in, opts)
+    return None if why else r
 
 
 def _eye_x(r: Rect, m: dict) -> float:
@@ -648,9 +664,9 @@ def solve_punches(runs: list[list[str]], item_rects: dict, measures: dict, setup
             p = next((r for f in factors
                       if (r := _zoomed(base, m, f, keep_out, keep_in, opts)) is not None), None)
             if p is None:
-                flags.append({"key": k, "text": f"punch-in skipped: even {opts.punch_min:.2f}x "
-                                                f"would cut a gesture, show outside the source, "
-                                                f"cut set dressing or end on a joint"})
+                att, why = _zoom_check(base, m, opts.punch_min, keep_out, keep_in, opts)
+                flags.append({"key": k, "attempt": att,
+                              "text": f"punch-in skipped: even {opts.punch_min:.2f}x would {_why(why)}"})
                 continue
             out[k] = p
             want = False
@@ -707,6 +723,10 @@ def solve_pushes(push_ins: list[dict], plan: dict, cam_items: list[dict], setup_
         def why():
             if e <= s:
                 return "empty range"
+            length = (e - s) / fps
+            if not opts.push_min_s - EPS <= length <= opts.push_max_s + EPS:
+                return (f"the line is {length:.1f} s long; push-ins run {opts.push_min_s:.0f} to "
+                        f"{opts.push_max_s:.0f} s")
             if item is None:
                 return "the range is not inside one on-camera item (a push-in never crosses a cut)"
             label = _info(setup_info, setup_of, key).get("label")
@@ -734,15 +754,20 @@ def solve_pushes(push_ins: list[dict], plan: dict, cam_items: list[dict], setup_
                 return (f"fast movement: gestures span {round(100 * (r - l) / base.w)}% of the "
                         f"frame width")
             keep_out, keep_in = _boxes(_info(setup_info, setup_of, key))
-            if _zoomed(base, m, opts.push, keep_out, keep_in, opts) is None:
-                return ("the push would cut a gesture, show outside the source, cut set dressing "
-                        "or end on a joint")
+            att, bad = _zoom_check(base, m, opts.push, keep_out, keep_in, opts)
+            if bad:
+                attempt[0] = att
+                return f"the push would {_why(bad)}"
             return None
 
+        attempt = [None]
         reason = why()
         if reason:
-            flags.append({"key": key, "text": f"push-in dropped at {pi['start_s']:.1f}-"
-                                              f"{pi['end_s']:.1f} s ({pi.get('text', '')!r}): {reason}"})
+            flag = {"key": key, "text": f"push-in dropped at {pi['start_s']:.1f}-"
+                                        f"{pi['end_s']:.1f} s ({pi.get('text', '')!r}): {reason}"}
+            if attempt[0] is not None:
+                flag["attempt"] = attempt[0]
+            flags.append(flag)
             continue
         base = item_rects[key]
         pushes.append({"key": key, "start_frame": s - item["start"], "end_frame": e - item["start"],
@@ -772,11 +797,11 @@ def solve_cuts(plan: dict, cam_items: list[dict], cuts: list[tuple[str, str]], i
     for p in pushes:
         k = p["key"]
         keep_out, keep_in = _boxes(_info(setup_info, setup_of, k))
-        to = _zoomed(rects[k], measures[k], opts.push, keep_out, keep_in, opts)
-        if to is None:
-            flags.append({"key": k, "text": f"push-in dropped ({p['text']!r}): after eye trace the "
-                                            f"push would cut a gesture, show outside the source, "
-                                            f"cut set dressing or end on a joint"})
+        to, bad = _zoom_check(rects[k], measures[k], opts.push, keep_out, keep_in, opts)
+        if bad:
+            flags.append({"key": k, "attempt": to,
+                          "text": f"push-in dropped ({p['text']!r}): after eye trace the push "
+                                  f"would {_why(bad)}"})
             continue
         kept.append({**p, "from": rects[k], "to": to})
     return rects, kept, flags

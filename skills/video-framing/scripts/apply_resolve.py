@@ -21,6 +21,8 @@ PUSH_COMP = "rvs_pushin"   # framing names its own comps; old ones are renamed P
 NEUTRAL_COMP = rvs.NEUTRAL_COMP  # a neutralised comp: pass-through, ignored by the bridge
 SCALING_KEY = "timelineInputResMismatchBehavior"
 SCALING_OK = "scaleToCrop"
+SCALING_FIT = "scaleToFit"   # the same scale factor as scaleToCrop when a source has the timeline's aspect
+ASPECT_TOL = 0.005           # "the timeline's aspect": within 0.5%
 FRAMING_SET = ("ZoomX", "ZoomY", "Pan", "Tilt")
 READBACK_TOL = 0.01
 
@@ -29,17 +31,44 @@ class ApplyError(RuntimeError):
     """Expected failure with a message for the user."""
 
 
-def check_scaling(timeline, project) -> None:
-    """Refuse unless mismatched sources scale with 'Scale full frame with crop' (the calibrated mode)."""
+def scaling_mode(timeline, project) -> str | None:
     v = timeline.GetSetting(SCALING_KEY) if timeline is not None else None
     if not v and project is not None:
         v = project.GetSetting(SCALING_KEY)
-    if v != SCALING_OK:
-        raise ApplyError(
-            f"the timeline scales mismatched-resolution sources with '{v or 'unknown'}'. video-framing is "
-            "calibrated for 'scale full frame with crop' (Timeline settings > Input scaling > Mismatched "
-            "resolution files). Change it in Resolve and run apply again; framing does not change your "
-            "timeline settings.")
+    return v or None
+
+
+def scaling_problem(mode: str | None, sources: dict, tl_size) -> str | None:
+    """Why the timeline's scaling mode does not fit the calibration, or None.
+
+    'scaleToCrop' always fits. 'scaleToFit' gives the same scale factor when the source has the
+    timeline's aspect (references/resolve-notes.md), so it fits when every framed source
+    ({name: (width, height)}) is within ASPECT_TOL of the timeline aspect.
+    """
+    fix = ("(Timeline settings > Input scaling > Mismatched resolution files). Change it in Resolve and "
+           "run apply again; framing does not change your timeline settings.")
+    if mode == SCALING_OK:
+        return None
+    if mode == SCALING_FIT:
+        tw, th = tl_size
+        odd = [f"{name} ({w}x{h})" for name, (w, h) in sorted(sources.items())
+               if abs((w / h) / (tw / th) - 1) > ASPECT_TOL]
+        if not odd:
+            return None
+        return (f"the timeline scales mismatched-resolution sources with 'scaleToFit', which matches the "
+                f"calibrated 'scale full frame with crop' only for sources with the timeline's aspect "
+                f"({tw}x{th}). Another aspect: {', '.join(odd)}. Switch to 'Scale full frame with crop' "
+                + fix)
+    return (f"the timeline scales mismatched-resolution sources with '{mode or 'unknown'}'. video-framing "
+            "is calibrated for 'scale full frame with crop' (and 'scale entire image to fit' when every "
+            "framed source has the timeline's aspect) " + fix)
+
+
+def check_scaling(timeline, project, sources: dict | None = None, tl_size=None) -> None:
+    """Refuse unless the scaling mode fits the calibration for these framed sources."""
+    problem = scaling_problem(scaling_mode(timeline, project), sources or {}, tl_size or (16, 9))
+    if problem:
+        raise ApplyError(problem)
 
 
 def _index(tl) -> dict:
@@ -248,8 +277,15 @@ def apply(session, solution: dict, applied_path=None) -> tuple[dict, list[dict]]
         raise
     added = []
     for f in solution.get("flags", []) + extra:
-        who = f.get("key") or (f"setup {f['setup']}" if f.get("setup") else "timeline")
+        if len(f.get("keys") or []) > 1 and f.get("setup"):
+            who = f"setup {f['setup']}"
+        else:
+            who = f.get("key") or (f"setup {f['setup']}" if f.get("setup") else "timeline")
         issue = session.add_issue("framing", f"{who}: {f['text']}", f.get("where"))
+        if issue:
+            added.append(issue)
+    for i in solution.get("issues", []):   # the agent's uncertain calls, from decisions.json
+        issue = session.add_issue("framing", i["text"], i["where"])
         if issue:
             added.append(issue)
     return entry, added

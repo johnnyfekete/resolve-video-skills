@@ -28,7 +28,7 @@ def _empty_setup(items) -> dict:
 
 def template(setups: dict[str, list[str]]) -> dict:
     return {"setups": {sid: _empty_setup(items) for sid, items in setups.items()},
-            "reclassify": {}, "push_ins": []}
+            "reclassify": {}, "push_ins": [], "issues": []}
 
 
 def _check_box(where: str, box) -> None:
@@ -42,8 +42,12 @@ def _check_box(where: str, box) -> None:
 
 
 def validate(data: dict) -> dict:
+    reclass = data.get("reclassify", {})
     for sid, s in data.get("setups", {}).items():
         label = s.get("label")
+        items = s.get("items") or []
+        if label is None and items and all(reclass.get(k) == "broll" for k in items):
+            continue  # nothing left to frame: no label needed
         if label is None:
             raise ValueError(f"setup {sid}: label is missing (plain or dynamic)")
         if label not in LABELS:
@@ -57,6 +61,14 @@ def validate(data: dict) -> dict:
     for n, p in enumerate(data.get("push_ins", [])):
         if p["end_s"] <= p["start_s"]:
             raise ValueError(f"push_ins[{n}]: end_s must be greater than start_s")
+    issues = data.get("issues", [])
+    if not isinstance(issues, list):
+        raise ValueError("issues must be a list of {\"text\", \"where\"}")
+    for n, i in enumerate(issues):
+        if not isinstance(i, dict) or not all(isinstance(i.get(f), str) and i[f].strip()
+                                              for f in ("text", "where")):
+            raise ValueError(f"issues[{n}]: needs non-empty strings \"text\" and \"where\" "
+                             f"(clip name and timecode), got {i!r}")
     return data
 
 
@@ -65,6 +77,7 @@ def load(path) -> dict:
     data.setdefault("setups", {})
     data.setdefault("reclassify", {})
     data.setdefault("push_ins", [])
+    data.setdefault("issues", [])
     return validate(data)
 
 
@@ -99,6 +112,7 @@ def merge(old: dict, new_setups: dict[str, list[str]]) -> dict:
             out["setups"][sid] = {**_empty_setup(items), **prev, "items": list(items)}
     out["reclassify"] = dict(old.get("reclassify", {}))
     out["push_ins"] = list(old.get("push_ins", []))
+    out["issues"] = list(old.get("issues", []))
     return out
 
 

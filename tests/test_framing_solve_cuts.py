@@ -205,6 +205,26 @@ class EyeTraceTest(Punches):
         self.assertEqual([f["key"] for f in eye], ["b"])
 
 
+class PunchReasonTest(Punches):
+    def test_gesture_reason_is_specific_and_attempt_kept(self):
+        ext = (0.45, 0.17, 0.81, 0.43)
+        out, flags = self.solve(["a", "b"], measures={"a": m(extent=ext), "b": m(extent=ext)})
+        self.assertEqual(len(flags), 1)
+        text = flags[0]["text"]
+        self.assertIn("cut a gesture", text)
+        for other in ("outside the source", "set dressing", "joint"):
+            self.assertNotIn(other, text)
+        att = flags[0]["attempt"]
+        self.assertAlmostEqual(BASE.w / att.w, OPTS.punch_min, places=6)
+
+    def test_set_dressing_reason_is_specific(self):
+        lamp = (0.20, 0.50, 0.26, 0.60)
+        out, flags = self.solve(["a", "b"], sinfo={"s1": info(keep_in=[list(lamp)])})
+        self.assertEqual(len(flags), 1)
+        self.assertIn("set dressing", flags[0]["text"])
+        self.assertNotIn("gesture", flags[0]["text"])
+
+
 # ---------------------------------------------------------------- push-ins
 
 FPS = 25
@@ -331,6 +351,34 @@ class PushTest(Pushes):
                                    measures={"V1@0": m(extent=wide)})
         self.assertEqual(pushes, [])
         self.assertIn("movement", flags[0]["text"])
+
+
+class PushLengthTest(Pushes):
+    ONE = [vid("S1_a.mov", 1, 0, 100 * FPS)]
+
+    def test_shorter_than_three_seconds_dropped(self):
+        pushes, flags = self.solve([push(10, 12.75)], self.ONE)
+        self.assertEqual(pushes, [])
+        self.assertIn("3 to 8 s", flags[0]["text"])
+
+    def test_longer_than_eight_seconds_dropped(self):
+        pushes, flags = self.solve([push(10, 19)], self.ONE)
+        self.assertEqual(pushes, [])
+        self.assertIn("3 to 8 s", flags[0]["text"])
+
+    def test_three_and_eight_seconds_kept(self):
+        items = [vid("S1_a.mov", 1, 0, 30 * FPS), vid("S1_b.mov", 1, 30 * FPS, 45 * FPS),
+                 vid("S1_c.mov", 1, 45 * FPS, 100 * FPS)]
+        pushes, flags = self.solve([push(10, 13), push(50, 58)], items)
+        self.assertEqual(len(pushes), 2, flags)
+
+    def test_gesture_reason_is_specific_and_attempt_kept(self):
+        pushes, flags = self.solve([push(10, 15)], self.ONE,
+                                   measures={"V1@0": m(extent=(0.45, 0.17, 0.82, 0.43))})
+        self.assertIn("cut a gesture", flags[0]["text"])
+        self.assertNotIn("joint", flags[0]["text"])
+        self.assertNotIn("outside the source", flags[0]["text"])
+        self.assertAlmostEqual(flags[0]["attempt"].w, BASE.w / OPTS.push, places=9)
 
 
 class SolveCutsTest(unittest.TestCase):

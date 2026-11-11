@@ -23,8 +23,10 @@ HDR_TRANSFERS = ("arib-std-b67", "smpte2084")
 EXTENT_LOW, EXTENT_HIGH = 2.0, 98.0
 HAND_WRIST_MAX = 0.2   # a hand box centre this close to a body-pose wrist belongs to the speaker
 HAND_FACE_MAX = 0.5    # without wrists: a hand this close to the face belongs to the speaker
+RESTING = 0.98         # a hand box reaching this far down rests at the source's bottom edge
 # Part of every cache key. Bump it whenever face_probe.swift or summarize changes what is measured.
-MEASURE_VERSION = 1
+# 2: hands resting at the source's bottom edge no longer set the extent's bottom.
+MEASURE_VERSION = 2
 
 
 # ---------------------------------------------------------------- summaries (pure)
@@ -72,6 +74,8 @@ def summarize(frames: list[dict]) -> dict:
     the frames with a face only (the speaker may leave the shot). `extent` is the per-edge 2nd/98th
     percentile over the head boxes and the speaker's hand boxes, so a gesture seen in a single frame
     does not widen it. Hands count from every frame, including frames where a gesture hides the face.
+    A hand box whose bottom is at RESTING or lower rests at the source's bottom edge (on the knees or
+    a table) and is already cut by the source: it counts for the left, right and top, not the bottom.
     With no face in any frame there is no speaker to frame, and every value is None.
     """
     seen = [f for f in frames if f.get("face")]
@@ -85,15 +89,17 @@ def summarize(frames: list[dict]) -> dict:
         if eyes_pts else None
     face_h = statistics.median(f["face"][3] - f["face"][1] for f in seen)
 
-    boxes = [f["head"] for f in seen if f.get("head")]
+    heads = [f["head"] for f in seen if f.get("head")]
+    boxes = list(heads)
     for f in frames:
         boxes.extend(_speaker_hands(f))
     extent = None
     if boxes:
+        low = [b[3] for b in boxes if b[3] < RESTING] or [b[3] for b in heads] or [b[3] for b in boxes]
         extent = [_percentile([b[0] for b in boxes], EXTENT_LOW),
                   _percentile([b[1] for b in boxes], EXTENT_LOW),
                   _percentile([b[2] for b in boxes], EXTENT_HIGH),
-                  _percentile([b[3] for b in boxes], EXTENT_HIGH)]
+                  _percentile(low, EXTENT_HIGH)]
 
     ys: dict[str, list[float]] = {}
     for f in seen:
@@ -201,11 +207,12 @@ def _cache_name(item: dict, src: Path) -> str:
     return hashlib.sha1(key.encode()).hexdigest() + ".json"
 
 
-def measure_items(plan: dict, cam_items: list[dict], workdir) -> dict[str, dict]:
+def measure_items(plan: dict, cam_items: list[dict], workdir, progress=None) -> dict[str, dict]:
     """One `summarize` result per on-camera item, keyed by `item_key`.
 
     The source range is src_start..src_end in the clip's own frame rate (so retimed clips measure what
     they actually show). Each summary is cached; a summary over zero extracted frames is not cached.
+    `progress(n, total, item, cached)` is called before each item.
     """
     cache = Path(workdir) / ".edit" / "framing"
     mdir = cache / "measure"
@@ -213,9 +220,11 @@ def measure_items(plan: dict, cam_items: list[dict], workdir) -> dict[str, dict]
     tl_fps = float(plan["timeline"]["fps"])
     out: dict[str, dict] = {}
     binary = None
-    for it in cam_items:
+    for n, it in enumerate(cam_items, 1):
         src = _source(it)
         cfile = mdir / _cache_name(it, src)
+        if progress:
+            progress(n, len(cam_items), it, cfile.exists())
         if cfile.exists():
             out[item_key(it)] = json.loads(cfile.read_text())
             continue

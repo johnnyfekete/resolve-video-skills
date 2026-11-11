@@ -50,6 +50,19 @@ class SummarizeTest(unittest.TestCase):
         self.assertAlmostEqual(s["extent"][2], HEAD[2])
         self.assertAlmostEqual(s["extent"][3], 0.75)
 
+    def test_hands_resting_at_the_source_bottom_do_not_set_the_bottom(self):
+        rest = [(0.20, 0.85, 0.30, 0.99), (0.70, 0.85, 0.80, 1.0)]
+        wrists = {"neck": [0.5, 0.6], "left_wrist": [0.25, 0.88], "right_wrist": [0.75, 0.88]}
+        s = summarize([frame(hands=rest, joints=wrists) for _ in range(20)])
+        self.assertEqual([round(v, 6) for v in s["extent"]], [0.20, HEAD[1], 0.80, HEAD[3]])
+
+    def test_raised_hand_still_sets_the_bottom_next_to_resting_ones(self):
+        rest = (0.20, 0.85, 0.30, 0.99)
+        up = (0.65, 0.55, 0.75, 0.70)
+        wrists = {"neck": [0.5, 0.6], "left_wrist": [0.25, 0.88], "right_wrist": [0.70, 0.66]}
+        s = summarize([frame(hands=[rest, up], joints=wrists) for _ in range(20)])
+        self.assertEqual([round(v, 6) for v in s["extent"]], [0.20, HEAD[1], 0.75, 0.70])
+
     def test_detected_fraction_uses_only_detected_frames(self):
         frames = [frame(eyes=(0.30, 0.40)) for _ in range(3)] + \
                  [frame(face=None, joints={"neck": [0.9, 0.95]}) for _ in range(7)]
@@ -157,6 +170,14 @@ class MeasureItemsTest(unittest.TestCase):
         out = self.run_items([self.item()])
         self.assertEqual(self.calls, [(str(self.src), 2.0, 4.0)])
         self.assertAlmostEqual(out["V1@0"]["eyes"][0], 0.5)
+
+    def test_progress_per_item(self):
+        seen = []
+        items = [self.item(), self.item(start=24, end=48, src_start=240, src_end=360)]
+        measure.measure_items({"timeline": {"fps": 24.0}}, items[:1], self.dir / "work")
+        measure.measure_items({"timeline": {"fps": 24.0}}, items, self.dir / "work",
+                              progress=lambda n, total, it, cached: seen.append((n, total, it["start"], cached)))
+        self.assertEqual(seen, [(1, 2, 0, True), (2, 2, 24, False)])
 
     def test_cached_items_are_skipped(self):
         self.run_items([self.item()])

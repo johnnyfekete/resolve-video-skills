@@ -40,10 +40,11 @@ from geometry import Rect, rect_to_props, zoom_budget, zoom_of  # noqa: E402
 from measure import measure_items  # noqa: E402
 from setups import group_setups, signature  # noqa: E402
 from solve import Opts, setup_info_from, solve_base, solve_cuts  # noqa: E402
-from timeline import _prefixes_match, item_key, on_camera, shot_prefix, visible_cuts  # noqa: E402
+from timeline import _prefixes_match, hidden, item_key, on_camera, shot_prefix, visible_cuts  # noqa: E402
 
 STEP = "framing"
 ASPECT_TOL = 0.01
+PUNCH_SKIP = "punch-in skipped: "
 
 
 class FramingError(Exception):
@@ -59,6 +60,11 @@ def tc(sec: float) -> str:
 def _paths(workdir) -> tuple[Path, Path]:
     w = Path(workdir).resolve()
     return w / rvs.STATE_DIR / "framing", w / "generated" / "framing"
+
+
+def say(*args) -> None:
+    """Progress output, flushed so a redirected log shows it as it happens."""
+    print(*args, flush=True)
 
 
 def _video_items(plan: dict) -> list[dict]:
@@ -174,26 +180,67 @@ def _sound_pieces(plan: dict, cam: list[dict], setup_of: dict) -> list[tuple[dic
     return out
 
 
-def transcript_lines(plan: dict, pieces: list[tuple[dict, str]], transcripts: dict) -> list[str]:
-    """`MM:SS.ss-MM:SS.ss <setup> <text>` per transcript segment heard on camera, in timeline time.
+_SENTENCE_END = re.compile(r"[.?!][\"'\u201d\u2019)\]]*$")
 
-    Segments are in source seconds; each is clipped to the piece's source window (100% speed)."""
+
+def _words(tr: dict) -> list[tuple[str, float, float]]:
+    """(word, start, end) in source seconds. Without word times, each segment's words are spread
+    over the segment in proportion to their length."""
+    ws = [(w["w"].strip(), float(w["start"]), float(w["end"])) for w in tr.get("words") or []
+          if (w.get("w") or "").strip()]
+    if ws:
+        return ws
+    out = []
+    for seg in tr.get("segments", []):
+        toks = (seg.get("text") or "").split()
+        if not toks:
+            continue
+        total, t = sum(len(x) for x in toks), float(seg["start"])
+        for x in toks:
+            dt = (float(seg["end"]) - float(seg["start"])) * len(x) / total
+            out.append((x, t, t + dt))
+            t += dt
+    return out
+
+
+def transcript_lines(plan: dict, pieces: list[tuple[dict, str]], transcripts: dict) -> list[str]:
+    """`MM:SS.ss-MM:SS.ss <setup> <text>` per sentence heard on camera, in timeline time.
+
+    Each piece gets only the words whose middle lies in its own source window (100% speed), so a
+    segment across a cut is not repeated. A word heard twice at the same timeline time (stacked
+    pieces of one source) is listed once. Lines break at sentence ends and at piece ends; the times
+    are those of the first and the last word.
+    """
     fps = float(plan["timeline"]["fps"])
-    rows = []
+    rows, seen, cache = [], set(), {}
     for it, sid in pieces:
-        tr = transcripts.get(it.get("path"))
+        path = it.get("path")
+        tr = transcripts.get(path)
         if not tr:
             continue
+        words = cache.setdefault(path, _words(tr))
         sf = float(it.get("src_fps") or fps)
         s0 = it["src_start"] / sf
         s1 = s0 + (it["end"] - it["start"]) / fps
-        t0 = it["start"] / fps
-        for seg in tr.get("segments", []):
-            a, b = max(seg["start"], s0), min(seg["end"], s1)
-            text = " ".join(seg.get("text", "").split())
-            if b <= a or not text:
+        t0, t1 = it["start"] / fps, it["end"] / fps
+        cur: list[tuple[float, float, str]] = []
+
+        def flush():
+            if cur:
+                rows.append((cur[0][0], cur[-1][1], sid, " ".join(w for _, _, w in cur)))
+                cur.clear()
+
+        for w, a, b in words:
+            if not s0 <= (a + b) / 2 < s1:
                 continue
-            rows.append((t0 + a - s0, t0 + b - s0, sid, text))
+            ta, tb = max(t0, t0 + a - s0), min(t1, t0 + b - s0)
+            if (path, round(ta, 2)) in seen:
+                continue
+            seen.add((path, round(ta, 2)))
+            cur.append((ta, tb, w))
+            if _SENTENCE_END.search(w):
+                flush()
+        flush()
     rows.sort()
     return [f"{tc(a)}-{tc(b)} {sid} {text}" for a, b, sid, text in rows]
 
@@ -203,7 +250,9 @@ def write_transcript(workdir: Path, fdir: Path, plan: dict, cam: list[dict], set
     org = workdir / rvs.STATE_DIR / "organize" / "transcripts"
     cache = org if org.is_dir() else fdir / "transcripts"
     transcripts, problems = {}, []
-    for path in sorted({p["path"] for p, _ in pieces if p.get("path")}):
+    paths = sorted({p["path"] for p, _ in pieces if p.get("path")})
+    for n, path in enumerate(paths, 1):
+        say(f"  transcript {n}/{len(paths)}: {Path(path).name}")
         try:
             transcripts[path] = rvs_transcribe.transcribe(path, cache)
         except (RuntimeError, OSError, subprocess.CalledProcessError) as e:
@@ -230,6 +279,44 @@ def _with_reclassify(plan: dict, cam: list[dict], reclassify: dict) -> list[dict
     return sorted(out, key=lambda i: (i["start"], i["track"]))
 
 
+def framed_items(plan: dict, reclassify: dict, applied: dict | None = None) -> list[dict]:
+    """On-camera items framing will set: reclassified, not hidden under b-roll, not hand-framed."""
+    cam = _with_reclassify(plan, on_camera(plan), reclassify)
+    skip = hidden(plan, cam) | dec.hand_framed(cam, applied)
+    return [i for i in cam if item_key(i) not in skip]
+
+
+def scaling_sources(plan: dict, reclassify: dict, applied: dict | None = None) -> dict:
+    """{clip name: (width, height)} of every source framing will set, one entry per file."""
+    out = {}
+    for it in framed_items(plan, reclassify, applied):
+        name = it.get("clip") or Path(it["path"]).name
+        out.setdefault(name, tuple(source_size(it["path"])))
+    return out
+
+
+def _reclassify(fdir: Path) -> dict:
+    p = fdir / "decisions.json"
+    try:
+        return (json.loads(p.read_text()) if p.exists() else {}).get("reclassify", {})
+    except ValueError:
+        return {}
+
+
+def scaling_warning(s, plan: dict, reclassify: dict) -> str | None:
+    """The scaling problem apply would refuse on, when Resolve is reachable; None otherwise."""
+    if s.project is None:
+        return None
+    try:
+        mode = apply_resolve.scaling_mode(s.current_timeline(), s.project)
+    except rvs.RvsError:
+        return None
+    fdir, _ = _paths(s.workdir)
+    sources = scaling_sources(plan, reclassify, dec.load_applied(fdir / "applied.json"))
+    tl = (int(plan["timeline"]["width"]), int(plan["timeline"]["height"]))
+    return apply_resolve.scaling_problem(mode, sources, tl)
+
+
 def _budget(sizes: list[tuple[int, int]], tl_h: int) -> float:
     return min(zoom_budget(h, tl_h) for _, h in sizes)
 
@@ -246,11 +333,20 @@ def prepare(opt) -> int:
     fps = float(plan["timeline"]["fps"])
     tl_w, tl_h = int(plan["timeline"]["width"]), int(plan["timeline"]["height"])
 
-    cam = _with_reclassify(plan, on_camera(plan), (old or {}).get("reclassify", {}))
+    reclass = (old or {}).get("reclassify", {})
+    warning = scaling_warning(s, plan, reclass)
+    if warning:
+        say(f"warning: apply will refuse: {warning}")
+    cam = _with_reclassify(plan, on_camera(plan), reclass)
     if not cam:
         raise FramingError("no on-camera items found on the current timeline")
-    print(f"{len(cam)} on-camera items; measuring (cached after the first run)...")
-    measures = measure_items(plan, cam, workdir)
+    say(f"{len(cam)} on-camera items; measuring (about 1.5 s per source second, cached after the first run)...")
+
+    def progress(n, total, it, cached):
+        say(f"  measure {n}/{total}: {it.get('clip')} at {tc(it['start'] / fps)}"
+            + (" (cached)" if cached else ""))
+
+    measures = measure_items(plan, cam, workdir, progress=progress)
     frames = {item_key(it): item_frame(fdir, plan, it) for it in cam}
     setups = group_setups(cam, {k: signature(f) for k, f in frames.items()})
     setup_of = {k: sid for sid, keys in setups.items() for k in keys}
@@ -281,6 +377,7 @@ def prepare(opt) -> int:
                "budget": round(min(c["budget"] for c in ctx_setups.values()), 3),
                "setups": ctx_setups, "items": items}
     (fdir / "context.json").write_text(json.dumps(context, indent=1, ensure_ascii=False))
+    say("transcribing the on-camera sources (cached after the first run)...")
     transcript = write_transcript(workdir, fdir, plan, cam, setup_of)
 
     data = dec.merge(old, setups) if old else dec.template(setups)
@@ -362,7 +459,9 @@ def run_solve(s, opt, workdir: Path) -> dict:
 
     all_items = [by_key[k] for k in listed]
     hand = dec.hand_framed(all_items, dec.load_applied(fdir / "applied.json"))
-    solve_keys = {sid: [k for k in keys if k not in hand] for sid, keys in setups.items()}
+    unseen = hidden(plan, all_items) - hand   # never on top: not framed, not flagged
+    solve_keys = {sid: [k for k in keys if k not in hand and k not in unseen]
+                  for sid, keys in setups.items()}
     cam = sorted((by_key[k] for keys in solve_keys.values() for k in keys),
                  key=lambda i: (i["start"], i["track"]))
     measures = measure_items(plan, cam, workdir)
@@ -395,6 +494,8 @@ def run_solve(s, opt, workdir: Path) -> dict:
         why = None
         if hk in hand:
             why = "the item is framed by hand and left alone"
+        elif hk in unseen:
+            why = "b-roll covers the speaker for the whole item"
         elif host is not None:
             sf = float(host.get("src_fps") or fps)
             want = (host["end"] - host["start"]) * sf / fps
@@ -431,6 +532,10 @@ def run_solve(s, opt, workdir: Path) -> dict:
 
     solution = _solution(plan, s, data, setups, solve_keys, results, rects, pushes, flags, hand,
                          by_key, measures, src_of, budgets, push_ins, opts)
+    solution["hidden"] = [{"key": k, "clip": by_key[k].get("clip"), "timecode": tc(by_key[k]["start"] / fps),
+                           "setup": next((x for x, keys in setups.items() if k in keys), None)}
+                          for k in sorted(unseen, key=lambda k: (by_key[k]["start"], by_key[k]["track"]))]
+    solution["issues"] = list(data.get("issues", []))
     solution["cuts"] = cuts_used
     solution["on_camera_matches"] = sorted({dec.match_key(i) for i in _with_reclassify(plan, on_camera(plan), reclass)}
                                            | {dec.match_key(by_key[k]) for k in listed})
@@ -495,8 +600,14 @@ def _solution(plan, s, data, setups, solve_keys, results, rects, pushes, flags, 
                            "from": _rect_json(p["from"]), "to": _rect_json(p["to"]),
                            "text": p.get("text", ""), "reason": p.get("reason", "")})
     video = _video_items(plan)
-    out_flags = [{"key": f.get("key"), "setup": f.get("setup"), "text": f["text"],
-                  "where": _flag_where(f, by_key, setups, fps, video)} for f in flags]
+    out_flags = []
+    for f in flags:
+        o = {"key": f.get("key"), "setup": f.get("setup"), "text": f["text"],
+             "where": _flag_where(f, by_key, setups, fps, video)}
+        if f.get("attempt") is not None:
+            o["attempt"] = _rect_json(f["attempt"])
+        out_flags.append(o)
+    out_flags = merge_flags(out_flags)
     out_setups = {}
     for sid, d in data["setups"].items():
         res = results.get(sid)
@@ -518,6 +629,30 @@ def _solution(plan, s, data, setups, solve_keys, results, rects, pushes, flags, 
             "options": dataclasses.asdict(opts), "setups": out_setups, "items": items,
             "pushes": out_pushes, "proposed_push_ins": push_ins, "hand_framed": left,
             "flags": out_flags}
+
+
+def merge_flags(flags: list[dict]) -> list[dict]:
+    """Fewer, merged flags. Every "punch-in skipped" flag of a setup becomes one flag with its
+    reasons counted; flags of one setup with the same text become one. A merged flag keeps the
+    first flag's key, where and attempt, lists every place in its text and every key in "keys"."""
+    groups: dict[tuple, list[dict]] = {}
+    for f in flags:
+        k = ("punch", f.get("setup")) if f["text"].startswith(PUNCH_SKIP) else ("same", f.get("setup"), f["text"])
+        groups.setdefault(k, []).append(f)
+    out = []
+    for k, fs in groups.items():
+        first, n = fs[0], len(fs)
+        if k[0] == "punch":
+            reasons = Counter(f["text"][len(PUNCH_SKIP):] for f in fs)
+            text = (f"{n} punch-in{'s' if n > 1 else ''} skipped on setup {k[1]}: "
+                    + "; ".join(f"{r} ({c}x)" for r, c in reasons.items())
+                    + ". At " + ", ".join(f["where"] for f in fs))
+        elif n > 1:
+            text = f"{first['text']} (on {n} items: {', '.join(f['where'] for f in fs)})"
+        else:
+            text = first["text"]
+        out.append({**first, "text": text, "keys": [f.get("key") for f in fs]})
+    return out
 
 
 # ---------------------------------------------------------------- previews and report
@@ -547,6 +682,7 @@ def write_previews(workdir: Path, plan: dict, solution: dict, data: dict) -> dic
             key = f.get("key") if f.get("key") in solution["items"] else None
             sid = f.get("setup")
             st = solution["setups"].get(sid) if sid else None
+            attempt = _rect(f["attempt"]) if f.get("attempt") else None
             if key:
                 e = solution["items"][key]
                 rect, it = _rect(e["rect"]), by_key[key]
@@ -558,7 +694,7 @@ def write_previews(workdir: Path, plan: dict, solution: dict, data: dict) -> dic
             st = solution["setups"].get(sid or "") or {"keep_out": [], "keep_in": []}
             out["flags"][n] = str(preview.before_after(
                 item_frame(fdir, plan, it), rect, gdir / "flags" / f"{n}.jpg", st["keep_out"],
-                st["keep_in"], inner=inner, title=f"flag {n}: {f['where']}"))
+                st["keep_in"], inner=inner, title=f"flag {n}: {f['where']}", attempt=attempt))
     except RuntimeError as e:
         print(f"warning: previews incomplete: {e}", file=sys.stderr)
     return out
@@ -577,7 +713,8 @@ def write_report(sol: dict, data: dict, path: Path, previews: dict) -> None:
          f"{len(sol['flags'])} flags.", "", "## Setups", ""]
     for sid, st in sol["setups"].items():
         zoom = f"{st['zoom']:.2f}x" if st["zoom"] else "not framed"
-        L.append(f"### {sid}: {st['label']}, base zoom {zoom}")
+        label = st["label"] or "b-roll (every item reclassified)"
+        L.append(f"### {sid}: {label}, base zoom {zoom}")
         L.append("")
         L.append(f"- Reason: {st['reason'] or '(none given)'}")
         L.append(f"- Items: {len(st['items'])}" + (f", budget {st['budget']:.2f}x" if st["budget"] else "")
@@ -627,6 +764,17 @@ def write_report(sol: dict, data: dict, path: Path, previews: dict) -> None:
             L.append(f"- {h['key']} {h['clip']} at {h['timecode']} (setup {h['setup']}): {props}{comps}")
     else:
         L.append("None.")
+    L += ["", "## Hidden under b-roll (left as is)", ""]
+    if sol.get("hidden"):
+        L.append("Fully covered by video on a higher track for their whole length: not framed, not flagged.")
+        L += [f"- {h['key']} {h['clip']} at {h['timecode']} (setup {h['setup']})" for h in sol["hidden"]]
+    else:
+        L.append("None.")
+    L += ["", "## Issues from the decisions", ""]
+    if sol.get("issues"):
+        L += [f"- **{i['where']}**: {i['text']}" for i in sol["issues"]]
+    else:
+        L.append("None.")
     L += ["", "## Flags", ""]
     if sol["flags"]:
         for n, f in enumerate(sol["flags"], 1):
@@ -661,7 +809,12 @@ def _print_summary(sol: dict, workdir: Path) -> None:
 def apply(opt) -> int:
     workdir = Path(opt.workdir).resolve()
     s = _session(workdir, need_resolve=True)
-    apply_resolve.check_scaling(s.current_timeline(), s.project)
+    plan = s.load_plan()
+    fdir, _ = _paths(workdir)
+    apply_resolve.check_scaling(
+        s.current_timeline(), s.project,
+        scaling_sources(plan, _reclassify(fdir), dec.load_applied(fdir / "applied.json")),
+        (int(plan["timeline"]["width"]), int(plan["timeline"]["height"])))
     _status(s)
     sol = run_solve(s, opt, workdir)
     _print_summary(sol, workdir)

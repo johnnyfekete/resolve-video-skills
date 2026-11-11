@@ -5,7 +5,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "skills" / "video-framing" / "scripts"))
 
-from timeline import item_key, on_camera, runs, shot_prefix, visible_cuts  # noqa: E402
+from timeline import _top_at, hidden, item_key, on_camera, runs, shot_prefix, visible_cuts  # noqa: E402
 
 
 def vid(clip, track, start, end, media="video", path=None):
@@ -164,6 +164,64 @@ class RunsTest(unittest.TestCase):
     def test_singleton_run(self):
         items = [vid("S1_a.MOV", 1, 0, 10, media="both")]
         self.assertEqual(runs(items, []), [["V1@0"]])
+
+
+class BrollNamesTest(unittest.TestCase):
+    def test_video_only_item_on_a_broll_track_is_broll(self):
+        p = plan(vid("S08_IMG_1.MOV", 3, 0, 100), vid("S08_IMG_1.MOV", 2, 0, 100),
+                 aud("S08_IMG_2.MOV", 0, 100))
+        p["tracks"] = {"video": [{"index": 1, "name": "On camera"}, {"index": 2, "name": "Voiceover"},
+                                 {"index": 3, "name": "B-roll inserts"}]}
+        self.assertEqual([i["track"] for i in on_camera(p)], [2])
+
+    def test_track_name_variants(self):
+        for name in ("BROLL", "b roll", "My b-Roll"):
+            p = plan(vid("S08_IMG_1.MOV", 2, 0, 100), aud("S08_IMG_2.MOV", 0, 100))
+            p["tracks"] = {"video": [{"index": 2, "name": name}]}
+            self.assertEqual(on_camera(p), [], name)
+
+    def test_file_named_broll_is_broll(self):
+        p = plan(vid("S41_screen_broll.mov", 2, 0, 100), aud("S41_IMG_2.MOV", 0, 100),
+                 vid("S42_demo_B-Roll.mov", 2, 100, 200, media="both"),
+                 vid("S43_IMG_3.MOV", 1, 200, 300, media="both"))
+        self.assertEqual([i["clip"] for i in on_camera(p)], ["S43_IMG_3.MOV"])
+
+    def test_file_named_broll_in_the_path_only(self):
+        it = vid("S41_x.mov", 2, 0, 100, path="/m/S41_screen-broll.mov")
+        self.assertEqual(on_camera(plan(it, aud("S41_IMG_2.MOV", 0, 100))), [])
+
+
+class HiddenTest(unittest.TestCase):
+    def setUp(self):
+        self.a = vid("S1_a.MOV", 1, 0, 100, media="both")
+
+    def keys(self, *extra):
+        return hidden(plan(self.a, *extra), [self.a])
+
+    def test_fully_covered_is_hidden(self):
+        self.assertEqual(self.keys(vid("broll.mov", 2, 0, 100)), {"V1@0"})
+
+    def test_covered_by_two_back_to_back_items_is_hidden(self):
+        self.assertEqual(self.keys(vid("b1.mov", 2, -10, 50), vid("b2.mov", 3, 50, 120)), {"V1@0"})
+
+    def test_one_visible_frame_is_enough(self):
+        self.assertEqual(self.keys(vid("b1.mov", 2, 0, 99)), set())
+        self.assertEqual(self.keys(vid("b1.mov", 2, 1, 100)), set())
+        self.assertEqual(self.keys(vid("b1.mov", 2, 0, 50), vid("b2.mov", 2, 51, 100)), set())
+
+    def test_lower_track_or_disabled_does_not_cover(self):
+        low = vid("b.mov", 1, 0, 100)
+        a = vid("S1_a.MOV", 2, 0, 100, media="both")
+        self.assertEqual(hidden(plan(a, low), [a]), set())
+        off = {**vid("b.mov", 2, 0, 100), "enabled": False}
+        self.assertEqual(self.keys(off), set())
+
+    def test_agrees_with_top_at_frame_by_frame(self):
+        extra = [vid("b1.mov", 2, 0, 40), vid("b2.mov", 3, 30, 70), vid("b3.mov", 2, 70, 100)]
+        video = [self.a, *extra]
+        never_top = all(_top_at(video, f) is not self.a for f in range(0, 100))
+        self.assertTrue(never_top)
+        self.assertEqual(self.keys(*extra), {"V1@0"})
 
 
 if __name__ == "__main__":

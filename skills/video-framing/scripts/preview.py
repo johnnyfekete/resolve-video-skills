@@ -3,8 +3,9 @@
 - `grab_frame`: one source frame as a JPEG, HDR tone-mapped like the measuring frames.
 - `setup_still`: a setup frame with a 10% grid labelled 0.0 to 1.0 on both axes, so the agent can
   read keep-out and keep-in boxes off it in normalised source coordinates.
-- `before_after`: the source with the crop rect (green), keep-out boxes (red) and keep-in boxes
-  (blue) on the left; the crop as it will look, at 960x540, on the right.
+- `before_after`: the source with the crop rect (green), keep-out boxes (red), keep-in boxes
+  (blue) and an optional rejected attempt (orange) on the left; the crop as it will look, at
+  960x540, on the right.
 
 Coordinates are normalised source coordinates 0..1, origin top-left. A box is (left, top, right, bottom).
 """
@@ -87,15 +88,19 @@ def _box(box, color: str, t: int = 3) -> str:
             f"color={color}:t={t}")
 
 
-def before_after(frame, rect, out, keep_out=(), keep_in=(), inner=None, title: str | None = None) -> Path:
-    """Left: the source with `rect` in green, keep-out boxes red, keep-in blue and an optional
-    `inner` rect (a push-in's end frame) in cyan. Right: the crop of `rect` at 960x540 with thirds."""
+def before_after(frame, rect, out, keep_out=(), keep_in=(), inner=None, title: str | None = None,
+                 attempt=None) -> Path:
+    """Left: the source with `rect` (the shipped frame) in green, keep-out boxes red, keep-in blue,
+    an optional `inner` rect (a push-in's end frame) in cyan and an optional `attempt` (a rejected
+    punch-in or push-in) in orange. Right: the crop of `rect` at 960x540 with thirds."""
     out = Path(out)
     out.parent.mkdir(parents=True, exist_ok=True)
     boxes = [_box(b, "red@0.9") for b in keep_out] + [_box(b, "blue@0.9") for b in keep_in]
     boxes.append(_box((rect.left, rect.top, rect.right, rect.bottom), "lime", 4))
     if inner is not None:
         boxes.append(_box((inner.left, inner.top, inner.right, inner.bottom), "cyan", 2))
+    if attempt is not None:
+        boxes.append(_box((attempt.left, attempt.top, attempt.right, attempt.bottom), "orange", 3))
     left = (f"[a]{','.join(boxes)},scale={HALF_W}:{HALF_H}:force_original_aspect_ratio=decrease,"
             f"pad={HALF_W}:{HALF_H}:(ow-iw)/2:(oh-ih)/2")
     if title:

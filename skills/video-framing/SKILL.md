@@ -9,7 +9,7 @@ Run this after `video-tighten` (it hides the jump cuts tighten creates) and befo
 
 Run scripts as `python3 <this skill's folder>/scripts/framing.py <command> --workdir <folder>`. Commands: `prepare`, `solve`, `apply`.
 
-The scripts measure and do the maths. **You make the judgement calls** (what is clutter, which setups are plain, which lines get a push-in). **Never stop to ask for approval.** The user reviews afterwards. A call you are unsure about still gets your best answer and the build continues; mention it in the decision's `reason`, and it becomes an issue.
+The scripts measure and do the maths. **You make the judgement calls** (what is clutter, which setups are plain, which lines get a push-in). **Never stop to ask for approval.** The user reviews afterwards. A call you are unsure about still gets your best answer and the build continues; add it to the `issues` list in `decisions.json` (see *How to decide*), and `apply` turns it into a checklist issue. The `reason` fields only go into the report.
 
 ## Workflow
 
@@ -18,10 +18,14 @@ The scripts measure and do the maths. **You make the judgement calls** (what is 
    ```bash
    python3 scripts/framing.py prepare --workdir <folder>
    ```
-   Finds the on-camera items, groups them into camera setups, measures face, eyes, body and hands (about 4 samples per second, cached after the first run), and writes:
+   If Resolve is open and the tracked timeline has hand edits that are not recorded yet, `prepare` first records them as a new version (`manual`, "hand edits before framing") through resolve-bridge, and says so. Tell the user. If Resolve is open and its scaling mode would make `apply` refuse (see *What it does to the timeline*), `prepare` prints a warning at the start, so the user can change it before the long run.
+
+   Finds the on-camera items, groups them into camera setups, measures face, eyes, body and hands (about 4 samples per second), and writes:
    - `generated/framing/setups/<id>.jpg`: one still per setup with a labelled 10% grid (0.0 to 1.0 on both axes);
-   - `.edit/framing/transcript.md`: `MM:SS.ss-MM:SS.ss <setup> <text>` per spoken segment, in timeline time;
+   - `.edit/framing/transcript.md`: `MM:SS.ss-MM:SS.ss <setup> <text>`, one line per sentence heard on camera, in timeline time. Each on-camera piece has only the words inside its own source range (word times from Whisper), so nothing repeats across pieces, and the times are those of the first and last word. Pick push-in ranges straight from these lines;
    - `.edit/framing/decisions.json`: a template with every setup empty (a re-run keeps decisions for setups whose items did not change), `context.json` with budgets and stills.
+
+   **The first `prepare` is slow:** measuring takes about 1.5 s per second of source, and Whisper runs once per source file. Run it in the background and expect tens of minutes on a 5-minute video. It prints a progress line per item and per source (flushed, so a redirected log shows it). Later runs are cached and fast; a skill update that changes how measuring works measures once more.
 
    It prints one line per setup (items, zoom budget, still) and the number of items that already carry hand framing: those are left exactly as they are, and the list is in `context.json` and `REPORT.md`.
 3. **Decide.** Look at every setup still and fill in `decisions.json` (see *How to decide*). Then pick the push-in lines.
@@ -30,12 +34,12 @@ The scripts measure and do the maths. **You make the judgement calls** (what is 
    python3 scripts/framing.py solve --workdir <folder>
    ```
    Writes `generated/framing/REPORT.md`, `setups/<id>_before_after.jpg` per setup and `flags/<n>.jpg` per flagged item, and `.edit/framing/solution.json`. An invalid `decisions.json` (missing label, box outside 0..1) stops with the reason and exit code 2.
-5. **Check the previews yourself.** Open every before/after image and the flag images. Look for the things the rules forbid: a tangent along the frame edge, a clipped hand, a head too close to the top, clutter still at an edge, a chosen plant cut off. If a frame looks wrong, fix **your own decisions** (move a box, change a label, drop a push-in) and solve again. Repeat until the previews are right or the remaining problems are ones only a person can judge. Read the report's flags and dropped push-ins too.
+5. **Check the previews yourself.** Open every before/after image and the flag images. Layout: the left half is the whole source with the frame that ships in green, keep-out boxes in red and keep-in boxes in blue (a push-in's end frame in cyan; on a flag about a skipped punch-in or a dropped push-in, the rejected attempt in orange); the right half is the result as the viewer sees it, with thirds. Look for the things the rules forbid: a tangent along the frame edge, a clipped hand, a head too close to the top, clutter still at an edge, a chosen plant cut off. If a frame looks wrong, fix **your own decisions** (move a box, change a label, drop a push-in) and solve again. Repeat until the previews are right or the remaining problems are ones only a person can judge. Read the report's flags and dropped push-ins too.
 6. **Apply.** Needs Resolve open with the project loaded.
    ```bash
    python3 scripts/framing.py apply --workdir <folder>
    ```
-   Solves again, then forks `<base>_vNN_framing` through resolve-bridge (grades, effects and hand edits stay), sets Zoom, Pan and Tilt, adds the push-ins, archives the previous version and saves the project. Every flag becomes an issue in `EDIT_CHECKLIST.md`, located by clip name and timecode. Tell the user the new timeline name, the issue ids and where the report is. Exit code 2 means an expected failure with a message (no timeline tracked, timeline not set to scale full frame with crop, and so on).
+   Solves again, then forks `<base>_vNN_framing` through resolve-bridge (grades, effects and hand edits stay), sets Zoom, Pan and Tilt, adds the push-ins, archives the previous version and saves the project. After the step is recorded, every flag and every entry of your `issues` list becomes an issue in `EDIT_CHECKLIST.md`, located by clip name and timecode. Flags are merged first: all skipped punch-ins of a setup become one issue with their reasons counted, and identical flags on one setup become one. Tell the user the new timeline name, the issue ids and where the report is. Exit code 2 means an expected failure with a message (no timeline tracked, a scaling mode framing is not calibrated for, and so on).
 
 ## How to decide
 
@@ -57,6 +61,10 @@ The scripts measure and do the maths. **You make the judgement calls** (what is 
   "push_ins": [
     {"start_s": 41.2, "end_s": 47.0, "text": "Writing is thinking.",
      "reason": "the thesis, first time it is said plainly"}
+  ],
+  "issues": [
+    {"text": "Plant at the right edge cropped with the coffee tables; unsure it was clutter",
+     "where": "S04_IMG_1234.MOV at 00:14.00"}
   ]
 }
 ```
@@ -64,11 +72,12 @@ The scripts measure and do the maths. **You make the judgement calls** (what is 
 Boxes are `[left, top, right, bottom]`, normalised 0..1 on the setup still (read them off its grid). `start_s` and `end_s` are timeline seconds from `transcript.md`. `items` is filled by `prepare`; leave it.
 
 - **Keep-out** boxes: everything nobody chose to show, near the edges. Appliances, magnets, spare chairs, lamps, cables, thermostats, door frames, a sofa sliver. The solver crops them out where it can without clipping a gesture.
-- **Keep-in** boxes: set dressing the speaker chose. Plants, flowers, a vase. The solver keeps them whole.
+- **Keep-in** boxes: set dressing the speaker chose. Plants, flowers, a vase. The solver keeps them whole, or crops them out clearly, never a sliver. Box the part that matters (the bouquet, the plant's leaves), not down to the source edge: a box that touches the edge of the source can never be kept whole inside a crop.
 - **Label** each setup `plain` or `dynamic`. `plain` is front-on, eye level and static (seated at a table). `dynamic` is a high or low angle, an unusual position (sitting on a counter) or a strong diagonal. Dynamic setups get no push-ins.
-- **Reason**: one line per setup, always. If you are unsure whether something is clutter or chosen, give your best answer and say so there.
-- **Reclassify** only to correct the grouping: an item the script treated as on-camera that is really b-roll (`broll`), or the other way round (`on_camera`). The key is `V<track>@<start frame>` (for example `V1@1234`): the keys of `items` in `.edit/framing/context.json`, which also gives each item's clip name and timecode. A key that matches no item is ignored, so check it against `context.json`.
-- **Push-in lines** come from the script and `transcript.md`: the thesis, a turn in the argument, a punchline, a call to action. Not filler, not setup sentences. Keep them at least 30 s apart, put them on plain setups, and write a reason for each. Fewer is better than weak ones. The solver drops any that break the rules and says why in the report.
+- **Reason**: one line per setup, always. It goes into the report.
+- **Issues**: every call you are unsure about (clutter or chosen, which of two things to keep, a line you nearly picked), with your best answer applied. `text` says what you decided and what a person should check; `where` is the clip name and timecode (from `context.json`), for example `S04_IMG_1234.MOV at 00:14.00`. Both must be non-empty. They become checklist issues when `apply` finishes.
+- **Reclassify** only to correct the grouping: an item the script treated as on-camera that is really b-roll (`broll`), or the other way round (`on_camera`). The key is `V<track>@<start frame>` (for example `V1@1234`): the keys of `items` in `.edit/framing/context.json`, which also gives each item's clip name and timecode. A key that matches no item is ignored, so check it against `context.json`. A setup whose items are all reclassified to `broll` needs no label.
+- **Push-in lines** come from the script and `transcript.md`: the thesis, a turn in the argument, a punchline, a call to action. Not filler, not setup sentences. Keep them 3 to 8 s long and at least 30 s apart, put them on plain setups where no b-roll covers the speaker, and write a reason for each. Fewer is better than weak ones. The solver drops any that break the rules and says which rule in the report (and shows the rejected push in orange on its flag preview).
 
 ## The framing rules
 
@@ -79,7 +88,8 @@ These are what the scripts enforce. The reasons are here so you can judge shots 
 - Centred on the face for direct address, shifting off centre by at most 5% of the width to keep clutter out. *Looking straight into the lens implies symmetry; off-centre faces read as a mistake unless the shot is clearly composed that way.*
 - The bottom edge never sits on a joint (chin, neck, elbows, wrists, waist, knees). *A frame that ends at a joint looks amputated; between joints it looks intended.*
 - No tangents. *An object whose edge runs along the frame edge pulls the eye. Include it clearly or crop it clearly: a laptop cut by the edge is fine, a sofa arm showing as a sliver is not.* Check this on the previews, the solver cannot see it.
-- Contains every head and hand position of every clip of the setup, with a margin of 4% of the frame height. *A hand that leaves the frame mid-gesture is the most noticeable framing error. Gestures always win over decluttering:* if clutter can only go by clipping a gesture, the gesture stays, the clutter goes as far as possible, and a flag is raised.
+- Never tighter than the face-size cap for tightness alone: the face is at most 28% of the frame height. *A face filling the frame reads as an extreme close-up.* This is why close setups barely tighten. Only clutter removal may go past it (keep-out comes before tightness).
+- Contains every head and hand position of every clip of the setup, with a margin of 4% of the frame height. Hands resting at the source's bottom edge (on the knees or a table, already cut by the source) do not hold the bottom of the frame down; they still count for the left, right and top, and the bottom edge still avoids joints. *A hand that leaves the frame mid-gesture is the most noticeable framing error. Gestures always win over decluttering:* if clutter can only go by clipping a gesture, the gesture stays, the clutter goes as far as possible, and a flag is raised.
 - One rectangle for the whole setup. *When the frame changes inside a setup it should only be the deliberate punch-in.* A single take whose gestures would loosen the whole setup by more than 10% zoom gets its own looser frame and a flag.
 - Never outside the source (no black edges) and inside the zoom budget. *Zooming past the source resolution makes the picture soft.*
 
@@ -90,7 +100,7 @@ These are what the scripts enforce. The reasons are here so you can judge shots 
 - A piece with a push-in is not also punched.
 
 **Push-ins on key lines**
-- Plain setups only, on lines that carry the video, slow and eased from 1.00 to about 1.06 over 3 to 8 s, anchored on the eyes. *A push-in is emphasis: it only works if it is rare, slow and on something that matters.*
+- Plain setups only, on lines that carry the video, slow and eased from 1.00 to about 1.06 over 3 to 8 s (enforced: shorter or longer lines are dropped), anchored on the eyes. *A push-in is emphasis: it only works if it is rare, slow and on something that matters.*
 - At most one per 30 s, never across a cut, never two in a row on one setup, never during fast movement, never while b-roll covers the speaker.
 
 **Zoom budget**
@@ -116,9 +126,10 @@ These are what the scripts enforce. The reasons are here so you can judge shots 
 ## What it does to the timeline
 
 - **Mode:** a fork. Framing only changes properties of existing items (the jump cuts already split them), so grades, titles, effects and hand edits survive. It never moves a cut.
-- **On-camera items** are linked audio+video items and video-only items whose shot matches a dialogue item (voiceover splits). Everything else is b-roll and keeps its framing.
+- **On-camera items** are linked audio+video items and video-only items whose shot matches a dialogue item (voiceover splits). Everything else is b-roll and keeps its framing. A file whose name contains "broll" or "b-roll", and a video-only item on a track named with "b-roll", "broll" or "b roll", is always b-roll.
+- **Hidden under b-roll:** an on-camera item that video on a higher track covers for its whole length is never seen, so it is left as it is: not framed, not flagged, listed in the report under "Hidden under b-roll (left as is)". It still counts for grouping setups. An item covered only in part is framed as usual.
 - **Hand framing is protected.** On the first run an on-camera item with non-default Zoom, Pan, Tilt, crop or a Fusion comp is left exactly as it is and listed in the report. Later runs re-solve only items that still match `.edit/framing/applied.json`; zoom never stacks.
-- **Scaling:** the timeline must scale sources with "scale full frame with crop", otherwise `apply` stops. The Zoom, Pan, Tilt maths is calibrated for that mode.
+- **Scaling:** the Zoom, Pan, Tilt maths is calibrated for "Scale full frame with crop" (`scaleToCrop`). "Scale entire image to fit" (`scaleToFit`) is accepted too when every framed source has the timeline's aspect (within 0.5%): the two scale the same then. Otherwise `apply` stops and names the clips with another aspect; any other mode stops it as well. `prepare` warns about this up front when Resolve is open.
 - **Push-ins** are Fusion Transform comps on the item (Resolve's Dynamic Zoom cannot be set by script). They are invisible to plain plans, so resolve-bridge detects them and warns before a later build would drop them. Details and limits in `references/resolve-notes.md`.
 
 ## Not handled yet

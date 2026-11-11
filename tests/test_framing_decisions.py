@@ -122,5 +122,32 @@ class AppliedIoTest(unittest.TestCase):
             self.assertEqual([f.name for f in p.parent.iterdir()], ["applied.json"])
 
 
+class BrollSetupAndIssuesTest(unittest.TestCase):
+    def test_setup_with_every_item_reclassified_needs_no_label(self):
+        d = template({"A": ["V1@0", "V1@10"]})
+        d["reclassify"] = {"V1@0": "broll", "V1@10": "broll"}
+        self.assertIsNone(decisions.validate(d)["setups"]["A"]["label"])
+
+    def test_setup_with_one_item_left_still_needs_a_label(self):
+        d = template({"A": ["V1@0", "V1@10"]})
+        d["reclassify"] = {"V1@0": "broll"}
+        with self.assertRaisesRegex(ValueError, "setup A.*label"):
+            decisions.validate(d)
+
+    def test_issues_are_validated(self):
+        d = template({})
+        d["issues"] = [{"text": "Lamp or plant?", "where": "S03_IMG_1.MOV at 01:03.00"}]
+        self.assertEqual(decisions.validate(d)["issues"], d["issues"])
+        for bad in ([{"text": "", "where": "x"}], [{"text": "x"}], [{"text": "x", "where": 3}], ["x"], {}):
+            d["issues"] = bad
+            with self.assertRaisesRegex(ValueError, "issues"):
+                decisions.validate(d)
+
+    def test_merge_keeps_issues(self):
+        old = template({"A": ["V1@0"]})
+        old["issues"] = [{"text": "t", "where": "w"}]
+        self.assertEqual(merge(old, {"A": ["V1@0"]})["issues"], old["issues"])
+
+
 if __name__ == "__main__":
     unittest.main()

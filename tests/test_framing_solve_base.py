@@ -320,5 +320,47 @@ class WeakDetectionTest(Base):
         self.assertEqual([f["key"] for f in res["flags"]], ["gone"])
 
 
+class RestingHandsTest(Base):
+    """Hands resting at the source's bottom edge (on knees or a table) are already cut by the source:
+    `summarize` leaves them out of the extent's bottom, so the frame can stop above them."""
+
+    @staticmethod
+    def frames(raised=False):
+        from measure import summarize
+        face, head = [0.45, 0.22, 0.55, 0.38], [0.44, 0.17, 0.56, 0.40]
+        joints = {"neck": [0.5, 0.45], "left_wrist": [0.40, 0.93], "right_wrist": [0.60, 0.93],
+                  "left_elbow": [0.38, 0.70]}
+        rest = [[0.36, 0.88, 0.44, 0.995], [0.56, 0.88, 0.64, 0.995]]
+        fs = [{"face": face, "eyes": [0.50, 0.30], "head": head, "hands": rest, "joints": joints}
+              for _ in range(30)]
+        if raised:  # a hand raised in front of the chest for a third of the clip
+            up = {**joints, "right_wrist": [0.58, 0.70]}
+            fs += [{"face": face, "eyes": [0.50, 0.30], "head": head,
+                    "hands": [rest[0], [0.54, 0.55, 0.62, 0.68]], "joints": up} for _ in range(15)]
+        return summarize(fs)
+
+    def test_resting_hands_no_longer_force_the_bottom_and_clutter_goes(self):
+        meas = {"k": self.frames()}
+        self.assertLess(meas["k"]["extent"][3], 0.98)
+        self.assertAlmostEqual(meas["k"]["extent"][0], 0.36)   # left and right still count
+        self.assertAlmostEqual(meas["k"]["extent"][2], 0.64)
+        lamp = (0.0, 0.70, 0.12, 1.0)
+        res = self.solve(meas, decision(keep_out=[lamp]))
+        r = res["rect"]
+        self.assertLess(r.bottom, 0.98, r)
+        self.assertGreaterEqual(r.left, lamp[2] - 1e-6, r)
+        self.assertFalse(any("clutter" in f["text"] for f in res["flags"]), res["flags"])
+        self.assertLessEqual(r.left, 0.36)
+        self.assertGreaterEqual(r.right, 0.64)
+        for y in meas["k"]["joints_y"].values():   # the bottom edge still avoids joints
+            self.assertGreaterEqual(abs(r.bottom - y), OPTS.joint_clear * r.h - 1e-6, r)
+
+    def test_raised_hand_mid_frame_still_counts_fully(self):
+        meas = {"k": self.frames(raised=True)}
+        self.assertAlmostEqual(meas["k"]["extent"][3], 0.68)
+        r = self.solve(meas)["rect"]
+        self.assertGreaterEqual(r.bottom, 0.68 + OPTS.gesture_margin * r.h - 1e-6, r)
+
+
 if __name__ == "__main__":
     unittest.main()
