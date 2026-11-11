@@ -21,6 +21,10 @@ SWIFT_SRC = Path(__file__).resolve().parent / "face_probe.swift"
 FRAME_WIDTH = 960
 HDR_TRANSFERS = ("arib-std-b67", "smpte2084")
 EXTENT_LOW, EXTENT_HIGH = 2.0, 98.0
+HAND_WRIST_MAX = 0.2   # a hand box centre this close to a body-pose wrist belongs to the speaker
+HAND_FACE_MAX = 0.5    # without wrists: a hand this close to the face belongs to the speaker
+# Part of every cache key. Bump it whenever face_probe.swift or summarize changes what is measured.
+MEASURE_VERSION = 1
 
 
 # ---------------------------------------------------------------- summaries (pure)
@@ -36,12 +40,42 @@ def _percentile(values: list[float], pct: float) -> float:
     return s[lo] + (s[hi] - s[lo]) * (k - lo)
 
 
+def _dist(a, b) -> float:
+    return ((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2) ** 0.5
+
+
+def _speaker_hands(f: dict) -> list:
+    """The frame's hand boxes that belong to the speaker, not to someone in the background.
+
+    A hand counts when its centre is near a body-pose wrist. When fewer than two wrists were found,
+    a hand near the face counts too. With neither wrists nor a face there is nothing to judge by,
+    so every hand counts.
+    """
+    joints = f.get("joints") or {}
+    wrists = [joints[w] for w in ("left_wrist", "right_wrist") if joints.get(w)]
+    face = f.get("face")
+    face_c = ((face[0] + face[2]) / 2, (face[1] + face[3]) / 2) if face else None
+    keep = []
+    for h in f.get("hands") or []:
+        c = ((h[0] + h[2]) / 2, (h[1] + h[3]) / 2)
+        if any(_dist(c, w) <= HAND_WRIST_MAX for w in wrists):
+            keep.append(h)
+        elif len(wrists) < 2 and face_c is not None:
+            if _dist(c, face_c) <= HAND_FACE_MAX:
+                keep.append(h)
+        elif not wrists and face_c is None:
+            keep.append(h)
+    return keep
+
+
 def summarize(frames: list[dict]) -> dict:
     """One summary over a clip's frame detections.
 
-    Frames with no face are ignored (the speaker is out of shot). `detected` is the fraction of frames
-    with a face. `eyes` and `joints_y` are medians; `extent` is the per-edge 2nd/98th percentile over
-    the head and hand boxes, so a gesture seen in a single frame does not widen it.
+    `detected` is the fraction of frames with a face. `eyes`, `face_h` and `joints_y` are medians over
+    the frames with a face only (the speaker may leave the shot). `extent` is the per-edge 2nd/98th
+    percentile over the head boxes and the speaker's hand boxes, so a gesture seen in a single frame
+    does not widen it. Hands count from every frame, including frames where a gesture hides the face.
+    With no face in any frame there is no speaker to frame, and every value is None.
     """
     seen = [f for f in frames if f.get("face")]
     detected = len(seen) / len(frames) if frames else 0.0
@@ -54,11 +88,9 @@ def summarize(frames: list[dict]) -> dict:
         if eyes_pts else None
     face_h = statistics.median(f["face"][3] - f["face"][1] for f in seen)
 
-    boxes = []
-    for f in seen:
-        if f.get("head"):
-            boxes.append(f["head"])
-        boxes.extend(f.get("hands") or [])
+    boxes = [f["head"] for f in seen if f.get("head")]
+    for f in frames:
+        boxes.extend(_speaker_hands(f))
     extent = None
     if boxes:
         extent = [_percentile([b[0] for b in boxes], EXTENT_LOW),
@@ -101,11 +133,19 @@ def probe_frames(binary: Path, images: list[Path]) -> list[dict]:
     with tempfile.TemporaryDirectory(prefix="face_probe_") as td:
         inp, out = Path(td) / "in.json", Path(td) / "out.json"
         inp.write_text(json.dumps([str(p) for p in images]))
-        subprocess.run([str(binary), str(inp), str(out)], check=True, capture_output=True, text=True)
+        r = subprocess.run([str(binary), str(inp), str(out)], capture_output=True, text=True)
+        if r.returncode != 0:
+            raise RuntimeError(f"face_probe failed (exit {r.returncode}):\n{r.stderr.strip()}")
         return json.loads(out.read_text())
 
 
 # ---------------------------------------------------------------- frames
+
+def _require_ffmpeg() -> None:
+    missing = [t for t in ("ffmpeg", "ffprobe") if not shutil.which(t)]
+    if missing:
+        raise RuntimeError(f"video-framing needs {' and '.join(missing)} on PATH to read frames")
+
 
 def _has_zscale() -> bool:
     r = subprocess.run(["ffmpeg", "-hide_banner", "-filters"], capture_output=True, text=True)
@@ -123,6 +163,7 @@ def extract_frames(path, src_start_s: float, src_end_s: float, out_dir, fps: flo
 
     HDR sources (HLG or PQ) are tone-mapped to SDR when ffmpeg has zscale, so Vision sees normal contrast.
     """
+    _require_ffmpeg()
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     for old in out_dir.glob("f_*.jpg"):
@@ -134,21 +175,41 @@ def extract_frames(path, src_start_s: float, src_end_s: float, out_dir, fps: flo
     else:
         vf = f"fps={fps},{scale}"
     duration = max(src_end_s - src_start_s, 1.0 / fps)
-    subprocess.run(["ffmpeg", "-v", "error", "-y", "-ss", f"{src_start_s:.3f}", "-i", str(path),
-                    "-t", f"{duration:.3f}", "-vf", vf, "-q:v", "3", str(out_dir / "f_%05d.jpg")],
-                   check=True, capture_output=True, text=True)
+    r = subprocess.run(["ffmpeg", "-v", "error", "-y", "-ss", f"{src_start_s:.3f}", "-i", str(path),
+                        "-t", f"{duration:.3f}", "-vf", vf, "-q:v", "3", str(out_dir / "f_%05d.jpg")],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        raise RuntimeError(f"ffmpeg could not read frames from {path}:\n{r.stderr.strip()}")
     return sorted(out_dir.glob("f_*.jpg"))
 
 
 # ---------------------------------------------------------------- items
 
-def _cache_name(item: dict) -> str:
-    key = f"{item['path']}:{item['src_start']}:{item['src_end']}"
+def _source(item: dict) -> Path:
+    """The item's source file; a clear error when the plan has no path or the file is gone."""
+    path = item.get("path")
+    name = f"{item_key(item)} ({item.get('clip') or 'unnamed clip'})"
+    if not path:
+        raise RuntimeError(f"cannot measure {name}: the plan item has no source path")
+    p = Path(path)
+    if not p.is_file():
+        raise RuntimeError(f"cannot measure {name}: source file not found: {path}")
+    return p
+
+
+def _cache_name(item: dict, src: Path) -> str:
+    """Changes with the algorithm version, the source range and the file itself (size, mtime)."""
+    st = src.stat()
+    key = f"v{MEASURE_VERSION}:{src}:{st.st_size}:{st.st_mtime_ns}:{item['src_start']}:{item['src_end']}"
     return hashlib.sha1(key.encode()).hexdigest() + ".json"
 
 
 def measure_items(plan: dict, cam_items: list[dict], workdir) -> dict[str, dict]:
-    """One `summarize` result per on-camera item, keyed by `item_key`. Cached per source range."""
+    """One `summarize` result per on-camera item, keyed by `item_key`.
+
+    The source range is src_start..src_end in the clip's own frame rate (so retimed clips measure what
+    they actually show). Each summary is cached; a summary over zero extracted frames is not cached.
+    """
     cache = Path(workdir) / ".edit" / "framing"
     mdir = cache / "measure"
     mdir.mkdir(parents=True, exist_ok=True)
@@ -156,18 +217,19 @@ def measure_items(plan: dict, cam_items: list[dict], workdir) -> dict[str, dict]
     out: dict[str, dict] = {}
     binary = None
     for it in cam_items:
-        cfile = mdir / _cache_name(it)
+        src = _source(it)
+        cfile = mdir / _cache_name(it, src)
         if cfile.exists():
             out[item_key(it)] = json.loads(cfile.read_text())
             continue
         if binary is None:
             binary = helper_path(cache)
         src_fps = float(it.get("src_fps") or tl_fps)
-        t0 = it["src_start"] / src_fps
-        t1 = t0 + (it["end"] - it["start"]) / tl_fps
+        t0, t1 = it["src_start"] / src_fps, it["src_end"] / src_fps
         with tempfile.TemporaryDirectory(prefix="framing_frames_") as td:
-            images = extract_frames(it["path"], t0, t1, td)
+            images = extract_frames(src, t0, t1, td)
             summary = summarize(probe_frames(binary, images) if images else [])
-        cfile.write_text(json.dumps(summary, indent=1))
+        if images:
+            cfile.write_text(json.dumps(summary, indent=1))
         out[item_key(it)] = summary
     return out

@@ -1,10 +1,13 @@
+import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "skills" / "video-framing" / "scripts"))
 
+import measure  # noqa: E402
 from measure import summarize  # noqa: E402
 
 HEAD = [0.40, 0.20, 0.60, 0.50]
@@ -29,7 +32,8 @@ class SummarizeTest(unittest.TestCase):
         self.assertAlmostEqual(s["joints_y"]["left_wrist"], 0.8)
 
     def test_single_hand_frame_dropped_from_extent(self):
-        frames = [frame() for _ in range(59)] + [frame(hands=[(0.02, 0.60, 0.10, 0.70)])]
+        near = {"neck": [0.5, 0.6], "left_wrist": [0.06, 0.70]}
+        frames = [frame() for _ in range(59)] + [frame(hands=[(0.02, 0.60, 0.10, 0.70)], joints=near)]
         s = summarize(frames)
         self.assertAlmostEqual(s["extent"][0], HEAD[0])
         self.assertAlmostEqual(s["extent"][1], HEAD[1])
@@ -38,7 +42,8 @@ class SummarizeTest(unittest.TestCase):
 
     def test_frequent_hands_in_extent(self):
         hand = (0.10, 0.60, 0.20, 0.75)
-        frames = [frame(hands=[hand]) for _ in range(20)] + [frame() for _ in range(40)]
+        near = {"neck": [0.5, 0.6], "left_wrist": [0.15, 0.65]}
+        frames = [frame(hands=[hand], joints=near) for _ in range(20)] + [frame() for _ in range(40)]
         s = summarize(frames)
         self.assertAlmostEqual(s["extent"][0], 0.10)
         self.assertAlmostEqual(s["extent"][1], HEAD[1])
@@ -46,15 +51,39 @@ class SummarizeTest(unittest.TestCase):
         self.assertAlmostEqual(s["extent"][3], 0.75)
 
     def test_detected_fraction_uses_only_detected_frames(self):
-        far = (0.01, 0.01, 0.05, 0.05)
         frames = [frame(eyes=(0.30, 0.40)) for _ in range(3)] + \
-                 [frame(face=None, hands=[far], joints={"neck": [0.9, 0.95]}) for _ in range(7)]
+                 [frame(face=None, joints={"neck": [0.9, 0.95]}) for _ in range(7)]
         s = summarize(frames)
         self.assertAlmostEqual(s["detected"], 0.3)
         self.assertAlmostEqual(s["eyes"][0], 0.30)
         self.assertAlmostEqual(s["eyes"][1], 0.40)
         self.assertEqual([round(v, 6) for v in s["extent"]], HEAD)
         self.assertAlmostEqual(s["joints_y"]["neck"], 0.6)
+
+    def test_hands_in_faceless_frames_count_for_extent(self):
+        hand = (0.02, 0.55, 0.12, 0.70)
+        frames = [frame() for _ in range(10)] + [frame(face=None, hands=[hand]) for _ in range(5)]
+        s = summarize(frames)
+        self.assertAlmostEqual(s["detected"], 10 / 15)
+        self.assertAlmostEqual(s["extent"][0], 0.02)
+        self.assertAlmostEqual(s["extent"][3], 0.70)
+        self.assertAlmostEqual(s["eyes"][0], 0.5)
+
+    def test_background_hand_far_from_wrists_dropped(self):
+        joints = {"neck": [0.5, 0.6], "left_wrist": [0.35, 0.7], "right_wrist": [0.65, 0.7]}
+        own = (0.30, 0.65, 0.38, 0.75)
+        stranger = (0.90, 0.50, 0.98, 0.60)
+        s = summarize([frame(hands=[own, stranger], joints=joints) for _ in range(30)])
+        self.assertAlmostEqual(s["extent"][0], 0.30)
+        self.assertAlmostEqual(s["extent"][2], HEAD[2])
+        self.assertAlmostEqual(s["extent"][3], 0.75)
+
+    def test_without_wrists_hand_must_be_near_face(self):
+        near = (0.60, 0.40, 0.70, 0.50)   # centre 0.2 from the face centre
+        far = (0.92, 0.80, 0.99, 0.95)    # centre well over 0.5 away
+        s = summarize([frame(hands=[near, far], joints={"neck": [0.5, 0.6]}) for _ in range(30)])
+        self.assertAlmostEqual(s["extent"][2], 0.70)
+        self.assertAlmostEqual(s["extent"][3], HEAD[3])
 
     def test_no_detections(self):
         s = summarize([frame(face=None) for _ in range(5)])
@@ -68,6 +97,80 @@ class SummarizeTest(unittest.TestCase):
         s = summarize([])
         self.assertEqual(s["detected"], 0.0)
         self.assertIsNone(s["eyes"])
+
+
+class MeasureItemsTest(unittest.TestCase):
+    """measure_items with the helper and ffmpeg stubbed out."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+        self.src = self.dir / "clip.mov"
+        self.src.write_bytes(b"x" * 10)
+        self.calls = []
+        self.n_frames = 3
+        self._saved = (measure.helper_path, measure.extract_frames, measure.probe_frames)
+
+        def fake_extract(path, t0, t1, out_dir, fps=4.0):
+            self.calls.append((str(path), t0, t1))
+            return [Path(out_dir) / f"f_{i}.jpg" for i in range(self.n_frames)]
+
+        measure.helper_path = lambda cache: Path("/nonexistent/face_probe")
+        measure.extract_frames = fake_extract
+        measure.probe_frames = lambda binary, images: [frame() for _ in images]
+
+    def tearDown(self):
+        measure.helper_path, measure.extract_frames, measure.probe_frames = self._saved
+        self.tmp.cleanup()
+
+    def item(self, **kw):
+        d = {"path": str(self.src), "clip": "clip.mov", "media": "both", "track": 1,
+             "start": 0, "end": 24, "src_start": 120, "src_end": 240, "src_fps": 60.0}
+        d.update(kw)
+        return d
+
+    def run_items(self, items):
+        return measure.measure_items({"timeline": {"fps": 24.0}}, items, self.dir / "work")
+
+    def test_range_comes_from_src_end(self):
+        # 24 timeline frames at 24 fps = 1 s, but the retimed item shows 2 s of source.
+        out = self.run_items([self.item()])
+        self.assertEqual(self.calls, [(str(self.src), 2.0, 4.0)])
+        self.assertAlmostEqual(out["V1@0"]["eyes"][0], 0.5)
+
+    def test_cached_items_are_skipped(self):
+        self.run_items([self.item()])
+        self.run_items([self.item()])
+        self.assertEqual(len(self.calls), 1)
+
+    def test_changed_file_invalidates_cache(self):
+        self.run_items([self.item()])
+        st = self.src.stat()
+        os.utime(self.src, ns=(st.st_atime_ns, st.st_mtime_ns + 5_000_000_000))
+        self.run_items([self.item()])
+        self.assertEqual(len(self.calls), 2)
+
+    def test_version_bump_invalidates_cache(self):
+        self.run_items([self.item()])
+        saved = measure.MEASURE_VERSION
+        measure.MEASURE_VERSION = saved + 1
+        try:
+            self.run_items([self.item()])
+        finally:
+            measure.MEASURE_VERSION = saved
+        self.assertEqual(len(self.calls), 2)
+
+    def test_zero_frames_not_cached(self):
+        self.n_frames = 0
+        out = self.run_items([self.item()])
+        self.assertEqual(out["V1@0"]["detected"], 0.0)
+        self.assertEqual(list((self.dir / "work" / ".edit" / "framing" / "measure").glob("*.json")), [])
+
+    def test_item_without_path_names_the_item(self):
+        with self.assertRaises(RuntimeError) as cm:
+            self.run_items([self.item(path=None, clip="S07_take.mov", start=48)])
+        self.assertIn("V1@48", str(cm.exception))
+        self.assertIn("S07_take.mov", str(cm.exception))
 
 
 if __name__ == "__main__":
