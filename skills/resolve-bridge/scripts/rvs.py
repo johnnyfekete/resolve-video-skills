@@ -479,6 +479,22 @@ class Session:
             n += 1
         return name if n == 2 else f"{name}_{n - 1}"
 
+    def record_step(self, step: str, summary: str) -> dict:
+        """Mark a step done without touching any timeline (steps that only produce data, like organize).
+        Needs no Resolve connection. Recording the same step again updates its entry."""
+        self.init_state()
+        cur = self.state["current"]
+        last = self.state["history"][-1] if self.state["history"] else None
+        if last and last["step"] == step and last.get("kind") == "record":
+            last.update({"summary": summary, "date": _now()})
+            entry = last
+        else:
+            entry = {"version": cur["version"], "step": step, "kind": "record", "timeline": cur.get("timeline"),
+                     "plan": None, "date": _now(), "summary": summary}
+            self.state["history"].append(entry)
+        self._save_state()
+        return entry
+
     def _archive(self, timeline_name: str):
         if not self.state.get("archive_folder"):
             return
@@ -754,7 +770,7 @@ def _print_status(s: Session):
         print(f"Current: v{st['current']['version']:02d}  {st['current']['timeline']}")
     print("History:")
     for h in st["history"]:
-        print(f"  v{h['version']:02d}  {h['date'][:16]}  {h['step']:<10} {h['timeline']}  - {h['summary']}")
+        print(f"  v{h['version']:02d}  {h['date'][:16]}  {h['step']:<10} {h['timeline'] or '(no timeline)'}  - {h['summary']}")
     if st.get("pending"):
         p = st["pending"]
         print(f"IN PROGRESS: step '{p['step']}' on '{p['timeline']}' since {p['date']}")
@@ -804,6 +820,9 @@ def main(argv=None):
     ir.add_argument("id")
     ir.add_argument("--note", default="")
     isub.add_parser("list")
+    rc = sub.add_parser("record", help="mark a step done without a timeline change (needs no Resolve)")
+    rc.add_argument("step")
+    rc.add_argument("--summary", required=True)
     sk = sub.add_parser("skip", help="mark a pipeline step as not needed for this video")
     sk.add_argument("step")
     sk.add_argument("--reason", default="")
@@ -867,6 +886,9 @@ def main(argv=None):
         elif args.cmd == "skip":
             s.skip_step(args.step, args.reason)
             print(f"skipped {args.step}")
+        elif args.cmd == "record":
+            s.record_step(args.step, args.summary)
+            print(f"recorded {args.step}")
         elif args.cmd == "unskip":
             s.unskip_step(args.step)
             print(f"{args.step} is back in the pipeline")

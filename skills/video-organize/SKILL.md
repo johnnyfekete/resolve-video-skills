@@ -62,7 +62,7 @@ B-roll: showing AI researching something funny
    ```
    A user's pick survives re-runs. `report` rewrites `TAKES.md` without changing anything else.
 8. **Rename.** Offered by `organize.py rename` (proposal first, `--apply` only after the user approves the full list, `--undo` to revert). Show the complete old-to-new list and apply only on a clear yes. Never rename any other way.
-9. **Record the step** through resolve-bridge, then point to `video-assemble` (not built yet) as the next step.
+9. **Done.** The run records the organize step itself, so there is nothing else to record. Point to `video-assemble` (not built yet) as the next step.
 
 ## Names
 

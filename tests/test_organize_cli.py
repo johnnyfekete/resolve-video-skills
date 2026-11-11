@@ -168,6 +168,8 @@ class OrganizeCliTest(unittest.TestCase):
         checklist = (self.work / "EDIT_CHECKLIST.md").read_text()
         self.assertIn("S03", checklist)
         self.assertIn("no complete or reworded take", checklist)
+        self.assertIn("- [x] **organize**", checklist)
+        self.assertIn("1 scenes without a take", checklist)
 
         frame_dirs = [Path(l.strip()) for l in out.splitlines() if l.strip().startswith(str(self.work.resolve()))]
         self.assertEqual(len(frame_dirs), 1, out)

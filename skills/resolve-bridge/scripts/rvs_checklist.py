@@ -67,7 +67,7 @@ def render(state: dict, notes: str | None, now: str) -> str:
     open_issues = [i for i in issues if i["status"] == "open"]
     done_issues = [i for i in issues if i["status"] != "open"]
 
-    if cur.get("timeline") is None and not hist:
+    if cur.get("timeline") is None:
         where = f"no timeline tracked yet · updated {now[:16].replace('T', ' ')}"
         if state.get("resolve_project"):
             where = f"Resolve project **{state['resolve_project']}** · " + where
@@ -99,7 +99,8 @@ def render(state: dict, notes: str | None, now: str) -> str:
             L.append(f"- [ ] **{name}** — in progress on `{pending['timeline']}`")
         elif name in last_by_step:
             h = last_by_step[name]
-            L.append(f"- [x] **{name}** — v{h['version']:02d} `{h['timeline']}`, {h['date'][:10]}: {h['summary']}")
+            tl = f"v{h['version']:02d} `{h['timeline']}`" if h.get("timeline") else "recorded"
+            L.append(f"- [x] **{name}** — {tl}, {h['date'][:10]}: {h['summary']}")
         elif name in skipped:
             L.append(f"- [x] ~~{name}~~ — skipped: {skipped[name] or 'no reason given'}")
         else:
@@ -137,6 +138,7 @@ def render(state: dict, notes: str | None, now: str) -> str:
     L.append("| Version | Date | Step | Timeline | Summary |")
     L.append("|---|---|---|---|---|")
     for h in hist:
-        L.append(f"| v{h['version']:02d} | {h['date'][:16].replace('T', ' ')} | {h['step']} | `{h['timeline']}` | {h['summary']} |")
+        tl = f"`{h['timeline']}`" if h.get("timeline") else "-"
+        L.append(f"| v{h['version']:02d} | {h['date'][:16].replace('T', ' ')} | {h['step']} | {tl} | {h['summary']} |")
     L.append("")
     return "\n".join(L)

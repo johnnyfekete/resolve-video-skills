@@ -42,7 +42,7 @@ Run scripts as `python3 <this skill's folder>/scripts/setup.py --workdir <folder
 
 - `AGENTS.md`: the rules every agent working in this folder follows, and this video's details. Only the block between the `resolve-video-skills` markers is generated. Anything the user adds outside it is kept.
 - `.edit/config.json`: the answers above.
-- `EDIT_CHECKLIST.md` and `.edit/state.json`, through resolve-bridge, once a timeline is tracked.
+- `EDIT_CHECKLIST.md` and `.edit/state.json`, through resolve-bridge, on every `write`. Before a timeline is tracked the state is empty (version 0).
 
 ## Behaviour
 

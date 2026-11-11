@@ -17,13 +17,14 @@ import collections
 import dataclasses
 import difflib
 import json
+import os
 import string
 import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
-sys.path.insert(0, str(HERE.parent.parent / "resolve-bridge" / "scripts"))
+sys.path.insert(0, os.environ.get("RVS_BRIDGE") or str(HERE.parent.parent / "resolve-bridge" / "scripts"))
 
 import broll  # noqa: E402
 import report  # noqa: E402
@@ -315,6 +316,11 @@ def cmd_run(workdir: Path, args) -> int:
 
     _analyse(data, mode)
     _finish(workdir, data)
+    s = rvs.Session(workdir, connect_now=False)
+    missing = sum("no complete or reworded take" in text for text, _ in
+                  _issues(data, mode, new_broll)) if mode != "none" else 0
+    s.record_step(STEP, f"{len(spoken) + len(new_broll)} recordings, "
+                  f"{sum(1 for t in data['takes'] if t.get('id'))} takes, {missing} scenes without a take")
     _next_steps(workdir, data, new_broll)
     return 0
 

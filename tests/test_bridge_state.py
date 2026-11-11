@@ -35,6 +35,22 @@ class BridgeStateTest(unittest.TestCase):
         self.assertIn("Next step: **organize**", text)
         self.assertIn("no timeline tracked yet", text)
 
+    def test_record_step_without_timeline(self):
+        s = self.session()
+        s.init_state("Demo")
+        self.assertEqual(rvs_checklist.next_step(s.state)[0], "organize")
+        entry = s.record_step("organize", "3 recordings")
+        self.assertEqual((entry["version"], entry["kind"], entry["timeline"], entry["plan"]),
+                         (0, "record", None, None))
+        again = self.session()
+        self.assertEqual(rvs_checklist.next_step(again.state)[0], "assemble")
+        text = (self.dir / "EDIT_CHECKLIST.md").read_text()
+        self.assertIn("- [x] **organize**", text)
+        self.assertNotIn("None", text)
+        again.record_step("organize", "4 recordings")
+        self.assertEqual(len(self.session().state["history"]), 1)
+        self.assertEqual(self.session().state["history"][0]["summary"], "4 recordings")
+
     def test_init_state_keeps_existing(self):
         s = self.session()
         s.init_state("Demo")

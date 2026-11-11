@@ -77,6 +77,7 @@ Build refuses to run if there are unrecorded hand edits, so a plan made from an 
 | `checklist` | Regenerate `EDIT_CHECKLIST.md` |
 | `issue add TEXT [--step S] [--where W]` / `issue resolve ID [--note N]` / `issue list` | Things a person must check |
 | `init [--base NAME]` | Start an empty state before any timeline exists (no Resolve needed); issues and skips work, `adopt` later records v01 |
+| `record STEP --summary S` | Mark a step done that changes no timeline (needs no Resolve); recording it again updates the entry |
 | `skip STEP [--reason R]` / `unskip STEP` | Mark a pipeline step as not needed |
 
 ## Rules for skills that use this
