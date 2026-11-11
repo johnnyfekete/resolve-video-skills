@@ -151,6 +151,14 @@ class PatchTest(unittest.TestCase):
         also_bad = take(*self.BAD_MIDDLE, start=40.0)
         self.assertEqual(score.patches(best, [also_bad], sc), [])
 
+    def test_separate_runs_give_separate_entries(self):
+        sc = scene()
+        best = take("I opened the the editor", "I wrote the line", "and I hit hit publish", start=0.0)
+        fixer = take(*GOOD, start=20.0)
+        found = score.patches(best, [fixer], sc)
+        self.assertEqual([f["clauses"] for f in found], [[0], [2]])
+        self.assertEqual([f["from_text"] for f in found], ["I opened the editor", "and I hit publish"])
+
     def test_missing_clause_is_patchable_and_clean_best_is_not(self):
         sc = scene()
         best = take("I opened the editor", "and I hit publish", start=0.0, status="incomplete")
@@ -192,6 +200,16 @@ class AudioMetricsTest(unittest.TestCase):
             self.assertIsNotNone(m["lufs"])
             square = self.make(tmp, "square.wav", "sgn(sin(2*PI*440*t))")
             self.assertIs(score.audio_metrics(square, 0.5, 2.5)["clipped"], True)
+
+    def test_silent_window_has_no_level(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self.make(tmp, "silence.wav", "0")
+            m = score.audio_metrics(path, 0.5, 2.5)
+            self.assertIsNone(m["lufs"])
+            self.assertIs(m["clipped"], False)
+            t = take(*GOOD)
+            got, reasons = score.score(t, scene(), m, [])
+            self.assertIn("no audio level", reasons)
 
 
 if __name__ == "__main__":

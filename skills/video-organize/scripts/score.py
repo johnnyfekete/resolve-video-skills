@@ -24,6 +24,7 @@ LUFS_FALLOFF = 12.0        # LU outside the range that costs all loudness points
 NOISE_MARGIN_DB = 40.0     # full marks need the noise floor this far below the speech level
 NOISE_MARGIN_FLOOR = 20.0  # at or below this margin the noise points are gone
 BROKEN_COST = 0.34         # share of the "clean" points each broken part costs
+SILENT_LUFS = -69.0
 REWORDED_PENALTY = 5
 INCOMPLETE_SHARE = 0.5     # an incomplete take earns at most this share of the completeness points
 MIN_PATCH_PAUSE = 0.15     # s of silence needed to cut a patch in or out
@@ -60,6 +61,8 @@ def audio_metrics(path: str, start: float, end: float, stream: int = 0) -> dict:
     m = re.search(r"\bI:\s+(-?[\d.]+|-inf)\s+LUFS", summary)
     if m:
         lufs = _number(m.group(1))
+        if lufs is not None and lufs <= SILENT_LUFS:
+            lufs = None  # ebur128 reports about -70 LUFS for silence
     overall = report.split("Overall", 1)[-1]
     m = re.search(r"Peak level dB:\s+(-?[\d.]+|-inf)", overall)
     if m:
@@ -312,8 +315,9 @@ def _clean_spans(take: Take, scene: Scene) -> dict[int, tuple[int, int]]:
 def patches(best: Take, others: list[Take], scene: Scene) -> list[dict]:
     """Fixes for the broken clauses of `best`: {"base": Take, "from": Take, "clauses": [int], "from_text": str}.
 
-    One entry per source take that is clean in every broken clause of `best`, cut at pauses of at least 0.15 s;
-    whole clauses only. Empty when `best` has nothing to fix or no other take can fix all of it."""
+    One entry per (source take, contiguous run of broken clauses): `clauses` is that run and `from_text` the
+    source's words for exactly that run. A source qualifies for a run when it is clean in every clause of it and
+    both takes can be cut at pauses of at least 0.15 s; whole clauses only. Empty when `best` has nothing to fix."""
     if best.status == "unmatched" or not scene.clauses:
         return []
     best_spans = _clean_spans(best, scene)
@@ -321,18 +325,16 @@ def patches(best: Take, others: list[Take], scene: Scene) -> list[dict]:
     if not broken:
         return []
     out = []
-    for other in others:
-        if other is best or other.status == "unmatched":
-            continue
-        spans = _clean_spans(other, scene)
-        if not all(c in spans for c in broken):
-            continue
-        if not all(_runs_cuttable(best, other, run, best_spans, spans) for run in _runs(broken)):
-            continue
-        first = min(spans[c][0] for c in broken)
-        last = max(spans[c][1] for c in broken)
-        text = " ".join(w["w"].strip() for w in other.words[first:last + 1])
-        out.append({"base": best, "from": other, "clauses": broken, "from_text": text})
+    for run in _runs(broken):
+        for other in others:
+            if other is best or other.status == "unmatched":
+                continue
+            spans = _clean_spans(other, scene)
+            if not all(c in spans for c in run) or not _runs_cuttable(best, other, run, best_spans, spans):
+                continue
+            first, last = spans[run[0]][0], spans[run[-1]][1]
+            text = " ".join(w["w"].strip() for w in other.words[first:last + 1])
+            out.append({"base": best, "from": other, "clauses": run, "from_text": text})
     return out
 
 
