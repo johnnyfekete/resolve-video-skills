@@ -1,6 +1,6 @@
 # Roadmap
 
-**Next to build:** `video-framing` (declutter crop, punch-ins, eye-trace).
+**Next to build:** `video-sound` (voice isolation, click-free cuts, loudness).
 
 ## Who this is for
 
@@ -70,7 +70,9 @@ Every session starts from the latest saved state, and every step ends with a sav
 - Tested on a 5:47, 65-item cut from 4K 60 fps phone footage: gave 18 edges (16 tails, 2 heads) more room where the cut was clipping or crowding a word, and flagged 2 cuts that need a different take.
 - Later: J/L cuts, filler-word removal (needs transcription).
 
-### 4. `video-framing`: declutter, zooms, eye-trace
+### 4. `video-framing`: declutter, zooms, eye-trace — **built (v0.1)**
+
+The agent decides per setup (keep-out, keep-in, plain or dynamic) and picks push-in lines; scripts measure and solve; previews are checked before `apply`. Design: `docs/superpowers/specs/2026-11-11-video-framing-design.md`. Resolve findings: `skills/video-framing/references/resolve-notes.md`.
 
 - **Declutter base framing, per setup:** export one still per camera setup, mark distracting edges (cables, shelves, door frames, half-visible objects), propose the tightest frame that removes them with good headroom and eye line. User approves once per setup, every clip of that setup inherits it.
 - Face and eye position at the first and last frame of every piece (Apple Vision helper or OpenCV).
@@ -129,7 +131,7 @@ Now:
 
 1. ~~`resolve-bridge`~~ done
 2. ~~`video-tighten`~~ done
-3. `video-framing`
+3. ~~`video-framing`~~ done
 4. `video-sound`
 5. `video-color`
 

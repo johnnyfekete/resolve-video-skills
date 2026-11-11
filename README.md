@@ -2,7 +2,7 @@
 
 AI agent skills that edit scripted talking-head videos in DaVinci Resolve Studio. You give it raw takes and a script. It builds the cut, frames it, grades it, mixes it and makes vertical shorts, all as **editable Resolve timelines**, not a flattened mp4.
 
-> **Status: early.** Available now: `resolve-bridge` (the versioned, always-saved base the other skills build on) `video-setup` (prepares each video project), `video-organize` (finds and scores takes, catalogues b-roll) and `video-tighten` (cut edges and pauses). The other skills are next. See [docs/ROADMAP.md](docs/ROADMAP.md).
+> **Status: early.** Available now: `resolve-bridge` (the versioned, always-saved base the other skills build on) `video-setup` (prepares each video project), `video-organize` (finds and scores takes, catalogues b-roll), `video-tighten` (cut edges and pauses) and `video-framing` (declutter crops, punch-ins, push-ins). The other skills are next. See [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## What it does
 
