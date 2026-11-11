@@ -61,7 +61,7 @@ B-roll: showing AI researching something funny
    python3 scripts/organize.py --workdir <folder> pick S02A-T03
    ```
    A user's pick survives re-runs. `report` rewrites `TAKES.md` without changing anything else.
-8. **Rename.** Offered by `organize.py rename` (proposal first, `--apply` only after the user approves the full list, `--undo` to revert). Show the complete old-to-new list and apply only on a clear yes. Never rename any other way.
+8. **Rename.** Offered by `organize.py rename` (proposal first, `--apply` only after the user approves the full list, `--undo` to revert). Show the complete old-to-new list and apply only on a clear yes. Never rename any other way. Clips already placed on a timeline in the open Resolve project are skipped and listed with the reason, because relinking a used clip can lose its cuts and grade; rename those by hand in Resolve if needed. With Resolve closed, `--apply` needs `--never-imported` (the footage was never imported).
 9. **Done.** The run records the organize step itself, so there is nothing else to record. Point to `video-assemble` (not built yet) as the next step.
 
 ## Names

@@ -6,6 +6,7 @@
     organize.py --workdir W answer SCENE FILE LETTER
     organize.py --workdir W pick TAKE_ID
     organize.py --workdir W report
+    organize.py --workdir W rename [--apply [--never-imported] | --undo]
 
 Runs with Resolve closed. State lives in <workdir>/.edit/organize/ (takes.json, broll.json, transcripts/,
 frames/); TAKES.md is written to the workdir and issues go to EDIT_CHECKLIST.md through resolve-bridge.
@@ -27,6 +28,7 @@ sys.path.insert(0, str(HERE))
 sys.path.insert(0, os.environ.get("RVS_BRIDGE") or str(HERE.parent.parent / "resolve-bridge" / "scripts"))
 
 import broll  # noqa: E402
+import rename  # noqa: E402
 import report  # noqa: E402
 import rvs  # noqa: E402
 import rvs_audio  # noqa: E402
@@ -406,6 +408,53 @@ def cmd_report(workdir: Path, args) -> int:
     return 0
 
 
+def _resolve_project(workdir: Path, required: bool):
+    """The open Resolve project, or None when it cannot be reached (an error when `required`)."""
+    try:
+        return rvs.Session(workdir, connect_now=True).project
+    except rvs.RvsError as e:
+        if required:
+            raise
+        print(f"note: {e}", file=sys.stderr)
+        return None
+
+
+def _show(rows: list[dict]) -> None:
+    for r in rows:
+        print(f"  {Path(r['old']).name}  ->  {Path(r['new']).name}   ({r['reason']})" if not r.get("skip")
+              else f"  {Path(r['old']).name}  skipped: {r['skip']}")
+
+
+def cmd_rename(workdir: Path, args) -> int:
+    if args.undo:
+        count = rename.undo(workdir, _resolve_project(workdir, False))
+        print(f"Restored {count} file names.")
+        return 0
+    data = store.load(_org(workdir))
+    project = None if args.never_imported else _resolve_project(workdir, args.apply)
+    used = rename.used_paths(project) if project is not None else set()
+    rows = rename.propose(data, _scenes(data), used)
+    todo = rename.active(rows)
+    if not args.apply:
+        if project is None and not args.never_imported:
+            print("Resolve was not reachable, so clips already on a timeline could not be checked.")
+        print(f"{len(todo)} files to rename, {len(rows) - len(todo)} skipped:")
+        _show(rows)
+        if todo:
+            print("Show the user the full list. Apply only on a clear yes: organize.py rename --apply")
+        return 0
+    if not todo:
+        print("Nothing to rename.")
+        return 0
+    errors = rename.validate(rows)
+    if errors:
+        raise OrganizeError("Rename blocked, nothing changed:\n  " + "\n  ".join(errors))
+    path = rename.apply(rows, workdir, project, never_imported=args.never_imported)
+    print(f"Renamed {len(todo)} files. Undo record: {path}. Undo with: organize.py rename --undo")
+    _show(rows)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="organize.py", description=__doc__.split("\n")[0])
     ap.add_argument("--workdir", default=".")
@@ -424,13 +473,17 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("pick", help="record the user's pick for a scene")
     p.add_argument("take_id")
     sub.add_parser("report", help="rewrite TAKES.md")
+    p = sub.add_parser("rename", help="propose, apply or undo film-style file names")
+    p.add_argument("--apply", action="store_true", help="rename after the user approved the full list")
+    p.add_argument("--never-imported", action="store_true", help="the footage was never imported into Resolve")
+    p.add_argument("--undo", action="store_true", help="reverse the last rename")
     args = ap.parse_args(argv)
     workdir = Path(args.workdir).resolve()
     commands = {"run": cmd_run, "describe": cmd_describe, "answer": cmd_answer, "pick": cmd_pick,
-                "report": cmd_report}
+                "report": cmd_report, "rename": cmd_rename}
     try:
         return commands[args.cmd](workdir, args)
-    except (OrganizeError, ValueError, OSError, rvs.RvsError) as e:
+    except (OrganizeError, ValueError, OSError, RuntimeError, rvs.RvsError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
 
