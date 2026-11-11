@@ -18,7 +18,7 @@ STEP = 0.001           # width search step (fraction of source width)
 EYE_HIGH = 0.25        # the eye line may sit between this and 1/3 of the frame height from the top
 N_SAMPLES = 9          # positions tried per axis when a frame must move (keep-out, keep-in, joints)
 EYE_BAND = (0.25, 0.36)  # an eye line outside this band (fraction of frame height) is flagged
-SLIVER_GAIN = 0.5      # tightening that costs the punch room must remove this much of a keep-out box
+SLIVER = 0.03          # keep-out visible as a strip thinner than this (of the frame) is a tangent
 
 
 @dataclass(frozen=True)
@@ -162,6 +162,18 @@ def _cut(r: Rect, box) -> bool:
     return r.overlaps(tuple(box)) > 1e-6 and not r.contains(tuple(box))
 
 
+def _slivers(r: Rect, boxes) -> list[tuple]:
+    """Keep-out boxes that show only as a thin strip along the frame edge (a tangent)."""
+    out = []
+    for box in boxes:
+        l, t, rt, b = box
+        iw = min(rt, r.right) - max(l, r.left)
+        ih = min(b, r.bottom) - max(t, r.top)
+        if iw > EPS and ih > EPS and (iw < SLIVER * r.w or ih < SLIVER * r.h):
+            out.append(box)
+    return out
+
+
 def _cuts(r: Rect, boxes) -> int:
     return sum(_cut(r, b) for b in boxes)
 
@@ -227,8 +239,7 @@ def _fmt(box) -> str:
 # ---------------------------------------------------------------- one frame for a group of items
 
 def _solve_group(g: dict, decision: dict, budget: float, opts: Opts) -> tuple[Rect, list[str]]:
-    floor, ko_floor, budget_ok = _floors(budget, opts)
-    punch_floor = min(opts.punch_min / budget, _w_max(opts)) if budget_ok else 0.0
+    floor, ko_floor, _ = _floors(budget, opts)
     wmax = _w_max(opts)
     notes: list[str] = []
     keep_out = [tuple(b) for b in decision.get("keep_out") or []]
@@ -269,12 +280,6 @@ def _solve_group(g: dict, decision: dict, budget: float, opts: Opts) -> tuple[Re
             # Would a frame tighter than the floor clear it? Then the budget is what blocks it.
             tighter = _widths(min(ko_floor, r.w), 0.05)[1::5]
             reason = "budget" if first_clear(tighter) else "gestures"
-        if punch_floor and best.w < punch_floor - EPS <= r.w:
-            # This tightening costs the punch room: only worth it if it removes a real amount.
-            alt = least(_widths(r.w, punch_floor))
-            gain = max(alt.overlaps(b) - best.overlaps(b) for b in keep_out)
-            if gain < SLIVER_GAIN:
-                best, reason = alt, "punch"
         r = best
         if reason:
             boxes = ", ".join(_fmt(b) for b in keep_out if _clutter(r, [b]) > EPS)
@@ -283,7 +288,6 @@ def _solve_group(g: dict, decision: dict, budget: float, opts: Opts) -> tuple[Re
                             "gestures kept",
                 "budget": f" needs more zoom than the source allows (zoom budget {budget:.2f}, "
                           f"declutter up to {1 / ko_floor:.2f}x); not a gesture problem",
-                "punch": " left as a sliver at the edge to keep room for punch-ins",
             }[reason])
 
     # Keep-in: never a sliver on the edge. Include it whole, else exclude it clearly.
@@ -462,5 +466,9 @@ def solve_base(setup_items: list[str], measures: dict, decision: dict, budget: f
     if not budget_ok:
         flags.append({"key": None, "text": _NO_HEADROOM.format(budget=budget)})
     punch_ok = budget_ok and budget * rect.w >= opts.punch_min - EPS
+    for k, r in items.items():  # whatever the steps above did, a clutter tangent is never silent
+        for box in _slivers(r, keep_out):
+            flags.append({"key": k, "text": f"clutter sliver at frame edge: keep-out {_fmt(box)} "
+                                            f"shows as a thin strip"})
     unique = list({(f["key"], f["text"]): f for f in flags}.values())  # setup and item checks overlap
     return {"rect": rect, "items": items, "flags": unique, "punch_ok": punch_ok}

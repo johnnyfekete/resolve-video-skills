@@ -73,16 +73,40 @@ class KeepOutTest(Base):
         self.assertFalse(any("clutter" in f["text"] for f in res["flags"]))
         self.assertTrue(res["punch_ok"])
 
-    def test_sliver_kept_rather_than_losing_punch_room(self):
-        # At budget 2 clearing x<0.29 needs zoom ~1.88, leaving no room for a 1.10 punch. The gain
-        # is a thin strip, so the punch room is kept and the sliver is flagged.
+    def test_clutter_cleared_even_when_it_costs_the_punch_room(self):
+        # At budget 2 clearing x<0.29 needs zoom ~1.88: the declutter crop wins, punches go.
         res = self.solve({"k": m(eyes=(0.53, 0.30))}, decision(keep_out=[(0, 0, 0.29, 1)]))
         r = res["rect"]
-        self.assertTrue(res["punch_ok"])
-        self.assertGreaterEqual(2.0 * r.w, OPTS.punch_min - 1e-6)
-        self.assertGreater(r.left, 0.25)  # most of the clutter still goes
-        texts = [f["text"] for f in res["flags"]]
-        self.assertTrue(any("clutter left in frame" in t and "punch" in t for t in texts), texts)
+        self.assertGreaterEqual(r.left, 0.29 - 1e-6)
+        self.assertLessEqual(abs(r.cx - 0.53), OPTS.max_shift * r.w + 1e-6)
+        self.assertLessEqual(zoom_of(r), 2.0 + 1e-6)
+        self.assertFalse(res["punch_ok"])
+        self.assertFalse(any("clutter" in f["text"] for f in res["flags"]))
+
+    def test_no_silent_keep_out_sliver_at_frame_edge(self):
+        # Sweep clutter positions, gestures and budgets: any keep-out showing as a strip thinner
+        # than 3% of the frame must come with a "clutter sliver at frame edge" flag.
+        def strip(r, box):
+            iw = min(box[2], r.right) - max(box[0], r.left)
+            ih = min(box[3], r.bottom) - max(box[1], r.top)
+            return iw > 1e-9 and ih > 1e-9 and (iw < 0.03 * r.w or ih < 0.03 * r.h)
+
+        checked = slivers = 0
+        for budget in (1.0, 1.2, 2.0, 2.5):
+            for edge in [i / 100 for i in range(5, 36, 2)]:
+                for ext in (None, (0.20, 0.17, 0.66, 0.70), (0.30, 0.17, 0.75, 0.90)):
+                    for box in ((0, 0, edge, 1), (1 - edge, 0, 1, 1)):
+                        res = self.solve({"k": m(eyes=(0.53, 0.30), extent=ext)},
+                                         decision(keep_out=[box]), budget=budget)
+                        for k, r in res["items"].items():
+                            checked += 1
+                            if strip(r, box):
+                                slivers += 1
+                                self.assertTrue(any(f["key"] == k and f["text"].startswith(
+                                    "clutter sliver at frame edge") for f in res["flags"]),
+                                    (budget, box, ext, r, res["flags"]))
+        self.assertGreater(checked, 300)
+        self.assertGreater(slivers, 0)  # the sweep does reach the sliver case
 
     def test_gesture_wins_over_clutter_and_is_flagged(self):
         ext = (0.20, 0.17, 0.66, 0.70)
