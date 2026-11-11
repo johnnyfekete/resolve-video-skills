@@ -49,8 +49,36 @@ class FindTakesTest(unittest.TestCase):
         found, _ = takes.find_takes(t, [scene("S01", CONFESSION)], "en")
         self.assertEqual(len(found), 1)
         self.assertEqual(found[0].status, "reworded")
-        self.assertEqual(found[0].missing, ["start"])
+        self.assertEqual(found[0].missing, [])
         self.assertEqual(found[0].extra, ["begin"])
+
+    def test_reworded_clause_is_not_incomplete(self):
+        script = "So I stopped asking the machine and started reading my old notes again."
+        t = transcript(("so I quit using chatgpt and started reading my old notes again", 0.0))
+        found, _ = takes.find_takes(t, [scene("S05", script)], "en")
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0].status, "reworded")
+        self.assertEqual(found[0].missing, [])
+        self.assertEqual(found[0].extra, ["quit", "using", "chatgpt"])
+
+    def test_missing_last_words_is_incomplete(self):
+        t = transcript(("Let me start with a confession AI helped me plan", 0.0))
+        found, _ = takes.find_takes(t, [scene("S01", CONFESSION)], "en")
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0].status, "incomplete")
+        self.assertEqual(found[0].missing, ["this", "video"])
+
+    def test_missing_first_words_is_incomplete(self):
+        t = transcript(("start with a confession AI helped me plan this video", 0.0))
+        found, _ = takes.find_takes(t, [scene("S01", CONFESSION)], "en")
+        self.assertEqual(found[0].status, "incomplete")
+        self.assertEqual(found[0].missing, ["let", "me"])
+
+    def test_one_dropped_inner_word_stays_complete(self):
+        t = transcript(("Let me start with confession AI helped me plan this video", 0.0))
+        found, _ = takes.find_takes(t, [scene("S01", CONFESSION)], "en")
+        self.assertEqual(found[0].status, "complete")
+        self.assertEqual(found[0].missing, ["a"])
 
     def test_missing_ending_is_incomplete(self):
         t = transcript(("Let me start with a confession", 0.0))
@@ -122,6 +150,10 @@ class IsSpokenTest(unittest.TestCase):
         self.assertFalse(takes.is_spoken(transcript(("hello there you", 0.0))))
         twenty_seconds = " ".join(["word"] * 67)  # 67 * 0.3 s = 20.1 s
         self.assertTrue(takes.is_spoken(transcript((twenty_seconds, 0.0))))
+
+    def test_short_utterances_add_up(self):
+        line = "let me start with a confession"  # 1.8 s each, 1 s pauses
+        self.assertTrue(takes.is_spoken(transcript((line, 0.0), (line, 2.8), (line, 5.6))))
 
     def test_silence_is_not_spoken(self):
         self.assertFalse(takes.is_spoken(transcript()))

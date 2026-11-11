@@ -19,8 +19,9 @@ MIN_COVERAGE = 0.5        # share of the scene's tokens a run must align to be a
 MIN_PRECISION = 0.6       # share of the run's own tokens that must align
 MIN_MATCHED_TOKENS = 3    # aligned tokens a candidate needs (fewer if the scene is shorter)
 COMPLETE_COVERAGE = 0.85  # coverage for "complete"; also requires no substituted words
-REWORDED_COVERAGE = 0.6   # coverage for "reworded"
+REWORDED_COVERAGE = 0.6   # share of the script said (aligned or substituted) for "reworded"
 MISSING_RUN = 4           # this many consecutive missing script tokens make a take incomplete
+EDGE_MISSING_RUN = 2      # ...or this many at the very start or end of the scene
 UNMATCHED_MIN = 3.0       # s of off-script speech that becomes an unmatched take
 
 OTHER_LANGUAGE = "other language"
@@ -96,39 +97,44 @@ class _Alignment:
     coverage: float
     precision: float
     matched: int
-    missing: list[str]
-    extra: list[str]
-    longest_missing: int
-    substituted: bool
+    missing: list[str]       # script tokens not said at all
+    substituted: list[str]   # script tokens said with other words
+    extra: list[str]         # spoken tokens that align with nothing in the script
+    longest_missing: int     # longest run of missing tokens inside the script
+    edge_missing: int        # longest run of missing tokens at the script's start or end
 
 
 def _align(script: list[str], spoken: list[str]) -> _Alignment:
     sm = difflib.SequenceMatcher(None, script, spoken, autojunk=False)
     matched = sum(b.size for b in sm.get_matching_blocks())
     missing: list[str] = []
+    substituted: list[str] = []
     extra: list[str] = []
-    longest = 0
-    substituted = False
+    longest = edge = 0
     for op, a1, a2, b1, b2 in sm.get_opcodes():
-        if op in ("delete", "replace"):
+        if op == "delete":
             missing.extend(script[a1:a2])
-            longest = max(longest, a2 - a1)
+            if a1 == 0 or a2 == len(script):
+                edge = max(edge, a2 - a1)
+            else:
+                longest = max(longest, a2 - a1)
+        elif op == "replace":
+            substituted.extend(script[a1:a2])
         if op in ("insert", "replace"):
             extra.extend(spoken[b1:b2])
-        if op == "replace":
-            substituted = True
     return _Alignment(matched / len(script), matched / len(spoken) if spoken else 0.0,
-                      matched, missing, extra, longest, substituted)
+                      matched, missing, substituted, extra, longest, edge)
 
 
-def _status(al: _Alignment) -> str:
-    if al.longest_missing >= MISSING_RUN:
+def _status(al: _Alignment, script_len: int) -> str:
+    """Only missing words make a take incomplete; substituted words make it reworded."""
+    said = 1 - len(al.missing) / script_len
+    if al.longest_missing >= MISSING_RUN or al.edge_missing >= EDGE_MISSING_RUN \
+            or said < REWORDED_COVERAGE:
         return "incomplete"
     if al.coverage >= COMPLETE_COVERAGE and not al.substituted:
         return "complete"
-    if al.coverage >= REWORDED_COVERAGE:
-        return "reworded"
-    return "incomplete"
+    return "reworded"
 
 
 def _language(utts: list[_Utterance]) -> str | None:
@@ -144,6 +150,8 @@ def _candidates(utts: list[_Utterance], usable: list[bool], sc: Scene) -> list[t
     max_run = len(script) / MIN_PRECISION  # a longer run cannot reach MIN_PRECISION
     found = []
     for i in range(len(utts)):
+        if not utts[i].tokens:
+            continue
         spoken: list[str] = []
         for j in range(i, len(utts)):
             if not usable[j]:
@@ -155,7 +163,7 @@ def _candidates(utts: list[_Utterance], usable: list[bool], sc: Scene) -> list[t
                 continue
             al = _align(script, spoken)
             if al.coverage >= MIN_COVERAGE and al.precision >= MIN_PRECISION and al.matched >= need:
-                found.append((al, i, j, sc))
+                found.append((al, i, j, sc, len(script)))
     return found
 
 
@@ -171,14 +179,14 @@ def find_takes(transcript: dict, scenes: list[Scene],
     candidates.sort(key=lambda c: (-c[0].coverage, -c[0].precision, c[1], c[2] - c[1]))
     used = [False] * len(utts)
     result: list[Take] = []
-    for al, i, j, sc in candidates:
+    for al, i, j, sc, script_len in candidates:
         if any(used[i:j + 1]):
             continue
         for k in range(i, j + 1):
             used[k] = True
         run = utts[i:j + 1]
         words = [w for u in run for w in u.words]
-        result.append(Take(file, sc.id, run[0].start, run[-1].end, round(al.coverage, 4), _status(al),
+        result.append(Take(file, sc.id, run[0].start, run[-1].end, round(al.coverage, 4), _status(al, script_len),
                            al.missing, al.extra, words, _language(run)))
 
     chatter: list[dict] = []
@@ -200,5 +208,5 @@ def find_takes(transcript: dict, scenes: list[Scene],
 
 
 def is_spoken(transcript: dict, min_speech: float = 3.0) -> bool:
-    """True when some stretch of continuous speech lasts at least min_speech seconds."""
-    return any(u.end - u.start >= min_speech and u.tokens for u in _utterances(transcript))
+    """True when the utterances add up to at least min_speech seconds of speech."""
+    return sum(u.end - u.start for u in _utterances(transcript) if u.tokens) >= min_speech
