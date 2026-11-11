@@ -1,0 +1,170 @@
+"""Render TAKES.md from the takes store and broll.json. Rendering only: nothing here measures or decides."""
+from __future__ import annotations
+
+import os
+
+import store
+from storyboard import Scene, tokens
+
+NO_STORYBOARD = ("No storyboard or script: takes are grouped by similar text and not scored for "
+                 "completeness")
+USABLE = ("complete", "reworded")
+
+
+def tc(seconds: float) -> str:
+    """00:08.0, or 1:02:03.5 past an hour."""
+    h, rest = divmod(float(seconds), 3600)
+    m, s = divmod(rest, 60)
+    return f"{int(h)}:{int(m):02d}:{s:04.1f}" if h else f"{int(m):02d}:{s:04.1f}"
+
+
+def _name(file: str, data: dict) -> str:
+    """The file relative to the footage folder when it is inside it."""
+    root = data.get("footage")
+    if root:
+        rel = os.path.relpath(file, root)
+        if not rel.startswith(".."):
+            return rel
+    return file
+
+
+def _text(words: list[dict], limit: int = 12) -> str:
+    said = [w["w"].strip() for w in words]
+    return " ".join(said[:limit]) + (" …" if len(said) > limit else "")
+
+
+def best_id(data: dict, scene_id: str) -> str | None:
+    """The user's pick when it still matches a take, else the top-ranked take."""
+    pick = data["picks"].get(scene_id)
+    stale = {p["scene"] for p in store.stale_picks(data)}
+    if pick and scene_id not in stale:
+        return pick["id"]
+    ranked = data.get("ranking", {}).get(scene_id) or []
+    return ranked[0] if ranked else None
+
+
+def _take_line(n: int, t: dict, data: dict, picked: bool) -> list[str]:
+    parts = [f"**{t['id']}** {_name(t['file'], data)} {tc(t['start'])}–{tc(t['end'])}",
+             f"score {t.get('score', 0)}"]
+    if t["status"] in ("reworded", "incomplete"):
+        parts.append(t["status"])
+    if t.get("verdict"):
+        parts.append(f"{t['verdict']} on set")
+    if picked:
+        parts.append("picked by you")
+    lines = [f"{n}. " + " · ".join(parts)]
+    if t.get("note"):
+        lines.append(f"   - {t['note']}")
+    reasons = [r for r in t.get("reasons", []) if r not in ("reworded", "incomplete")]
+    if reasons:
+        lines.append("   - lost points: " + "; ".join(reasons))
+    for p in data.get("patches", {}).get(t["scene"], []):
+        if p["base"] == t["id"]:
+            lines.append(f"   - patch: {p['base']} + {p['from']} from \"{p['from_text']}\"")
+    return lines
+
+
+def _scene_section(sc: Scene, takes: list[dict], data: dict) -> list[str]:
+    out = [f"## {sc.id}", ""]
+    if sc.text:
+        out += [f"> {sc.text}", ""]
+    extras = (["Voiceover."] if sc.voiceover else []) + ([f"B-roll: {sc.broll}"] if sc.broll else [])
+    if extras:
+        out += [" ".join(extras), ""]
+    by_id = {t["id"]: t for t in takes}
+    order = [i for i in data.get("ranking", {}).get(sc.id, []) if i in by_id]
+    order += [t["id"] for t in takes if t["id"] not in order]
+    pick = data["picks"].get(sc.id)
+    best = best_id(data, sc.id)
+    picked = bool(pick) and best == pick["id"]
+    if picked:
+        order.remove(best)
+        order.insert(0, best)
+    elif pick:
+        out += [f"Your pick {pick['id']} no longer matches a take.", ""]
+    for n, tid in enumerate(order, 1):
+        out += _take_line(n, by_id[tid], data, picked and tid == best)
+    return out + [""]
+
+
+def _broll_section(scenes: list[Scene], mode: str, data: dict, broll: dict) -> list[str]:
+    files = [f["file"] for f in data.get("files", []) if f["kind"] == "broll"]
+    if not files and not any(sc.broll for sc in scenes):
+        return []
+    notes = {sc.id: sc.broll for sc in scenes if sc.broll}
+    out = ["## B-roll", ""]
+    for f in files:
+        entry = broll.get(f, {})
+        out.append(f"- {_name(f, data)}")
+        moments = entry.get("moments") or []
+        if moments:
+            out.append("  - best moments: " + ", ".join(
+                f"{tc(m['start'])}–{tc(m['end'])} (score {m['score']})" for m in moments[:3]))
+        else:
+            out.append("  - no steady, sharp, well-exposed moment of 3 s or more")
+        if entry.get("frames"):
+            for t, desc in sorted(entry["frames"].items(), key=lambda kv: float(kv[0])):
+                out.append(f"  - at {tc(float(t))}: {desc}")
+        else:
+            out.append(f"  - frames not described yet: {entry.get('frame_dir')}")
+        for m in entry.get("matches") or []:
+            note = f" ({notes[m['scene']]})" if m["scene"] in notes else ""
+            out.append(f"  - matches {m['scene']}{note} {tc(m['start'])}–{tc(m['end'])}: {m.get('why', '')}")
+    matched = {m["scene"] for e in broll.values() for m in e.get("matches") or []}
+    if mode != "none":
+        for sid, note in notes.items():
+            if sid not in matched:
+                out.append(f"- not found yet: {sid} {note}")
+    return out + [""]
+
+
+def render(scenes: list[Scene], mode: str, data: dict, broll: dict) -> str:
+    out = ["# Takes", "",
+           "Regenerated by video-organize on every run; edits made here are lost. Pick takes through the skill.",
+           ""]
+    if mode == "none":
+        out += [f"> **Warning:** {NO_STORYBOARD}.", ""]
+
+    if data.get("questions"):
+        out += ["## Questions waiting", ""]
+        for q in data["questions"]:
+            rep, f = q["files"]
+            letter = data["shots"].get(q["scene"], {}).get(f, "?")
+            out.append(f"- {q['scene']}: is {_name(f, data)} the same camera setup as {_name(rep, data)}? "
+                       f"(frame difference {q['diff']}, letter {letter} for now)")
+        out.append("")
+
+    with_id = [t for t in data["takes"] if t.get("id")]
+    for sc in scenes:
+        takes = [t for t in with_id if t["scene"] == sc.id]
+        if takes:
+            out += _scene_section(sc, takes, data)
+
+    unmatched = [t for t in data["takes"] if not t.get("id")]
+    if unmatched:
+        out += ["## Unmatched spoken clips", ""]
+        out += [f"- {_name(t['file'], data)} {tc(t['start'])}–{tc(t['end'])}: \"{_text(t['words'])}\""
+                for t in unmatched]
+        out.append("")
+
+    chatter = {f: len(segs) for f, segs in data.get("chatter", {}).items() if segs}
+    if chatter:
+        out += ["## On-set chatter", ""]
+        out += [f"- {_name(f, data)}: {n} (kept out of the takes)" for f, n in chatter.items()]
+        out.append("")
+
+    out += _broll_section(scenes, mode, data, broll)
+
+    if mode != "none":
+        missing = []
+        for sc in scenes:
+            if not tokens(sc.text):
+                continue
+            takes = [t for t in with_id if t["scene"] == sc.id]
+            if not takes:
+                missing.append(f"- {sc.id}: no takes")
+            elif not any(t["status"] in USABLE for t in takes):
+                missing.append(f"- {sc.id}: only incomplete takes")
+        if missing:
+            out += ["## Scenes with no usable take", ""] + missing + [""]
+    return "\n".join(out).rstrip() + "\n"
