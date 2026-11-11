@@ -110,9 +110,32 @@ class VisibleCutsTest(unittest.TestCase):
         got = visible_cuts(p, on_camera(p), {"V2@0": "s", "V2@100": "s"})
         self.assertEqual(len(got), 1)
 
-    def test_oncamera_on_higher_track_is_not_broll(self):
+    def test_oncamera_on_higher_track_covering_cut_hides_it(self):
         other = vid("S5_z.MOV", 2, 50, 150, media="both")
-        self.assertEqual(len(self.cuts(other)), 1)
+        got = self.cuts(other)
+        self.assertNotIn(("V1@0", "V1@100"), got)
+
+    def test_a_on_top_track_broll_below_ends_at_cut_is_visible(self):
+        a = vid("S1_a.MOV", 3, 0, 100, media="both")
+        b = vid("S1_b.MOV", 1, 100, 200, media="both")
+        p = plan(a, b, vid("IMG_9.MOV", 2, 50, 100))
+        got = visible_cuts(p, on_camera(p), {"V3@0": "s", "V1@100": "s"})
+        self.assertEqual(got, [("V3@0", "V1@100")])
+
+    def test_b_on_top_track_broll_below_covering_last_frame_of_a_hides(self):
+        a = vid("S1_a.MOV", 1, 0, 100, media="both")
+        b = vid("S1_b.MOV", 3, 100, 200, media="both")
+        p = plan(a, b, vid("IMG_9.MOV", 2, 50, 100))
+        got = visible_cuts(p, on_camera(p), {"V1@0": "s", "V3@100": "s"})
+        self.assertEqual(got, [])
+
+    def test_disabled_item_ignored(self):
+        off = vid("IMG_9.MOV", 3, 80, 120)
+        off["enabled"] = False
+        self.assertEqual(len(self.cuts(off)), 1)
+
+    def test_item_missing_from_setup_of_skipped(self):
+        self.assertEqual(self.cuts(setup_of={"V1@0": "s"}), [])
 
     def test_gap_means_no_cut(self):
         b = vid("S1_b.MOV", 1, 101, 200, media="both")
@@ -129,6 +152,14 @@ class RunsTest(unittest.TestCase):
         keys = [item_key(i) for i in items]
         cuts = [(keys[0], keys[1]), (keys[1], keys[2]), (keys[3], keys[4])]
         self.assertEqual(runs(items, cuts), [keys[0:3], keys[3:5]])
+
+    def test_branching_cuts_each_item_once(self):
+        items = [vid("S1_a.MOV", 1, i * 10, i * 10 + 10, media="both") for i in range(3)]
+        k = [item_key(i) for i in items]
+        got = runs(items, [(k[0], k[1]), (k[0], k[2]), (k[1], k[2])])
+        flat = [x for r in got for x in r]
+        self.assertEqual(sorted(flat), sorted(k))
+        self.assertEqual(got, [k])
 
     def test_singleton_run(self):
         items = [vid("S1_a.MOV", 1, 0, 10, media="both")]

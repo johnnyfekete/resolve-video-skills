@@ -55,18 +55,29 @@ def on_camera(plan: dict) -> list[dict]:
     return sorted(out, key=lambda i: (i["start"], i["track"]))
 
 
+def _top_at(items: list[dict], frame: int) -> dict | None:
+    """The topmost enabled video item covering `frame` (what the viewer sees)."""
+    best = None
+    for it in items:
+        if it["start"] <= frame < it["end"]:
+            if best is None or (it["track"], it["start"]) > (best["track"], best["start"]):
+                best = it
+    return best
+
+
 def visible_cuts(plan: dict, cam_items: list[dict],
                  setup_of: dict[str, str]) -> list[tuple[str, str]]:
     """Pairs (key_a, key_b) of adjacent same-setup items with a visible cut.
 
-    The cut is hidden when a b-roll item (any video item that is not
-    on-camera) on a higher track than b covers frame b.start or b.start - 1.
-    Only those two frames matter; partial coverage elsewhere is ignored.
+    The viewer sees the topmost video item at each frame (all enabled video
+    items count, on-camera or b-roll). A cut a->b (a.end == b.start) is
+    visible iff the top item at b.start - 1 is a and the top at b.start is b.
+    Only those two frames matter. Items whose key is missing from `setup_of`
+    are skipped silently: they form no cuts.
     """
-    cam_ids = {id(i) for i in cam_items}
-    broll = [i for i in plan.get("items", [])
+    video = [i for i in plan.get("items", [])
              if i.get("media") in ("video", "both") and i.get("track") is not None
-             and id(i) not in cam_ids]
+             and i.get("enabled", True) is not False]
     by_start: dict[int, list[dict]] = {}
     for it in cam_items:
         by_start.setdefault(it["start"], []).append(it)
@@ -78,29 +89,33 @@ def visible_cuts(plan: dict, cam_items: list[dict],
             kb = item_key(b)
             if ka not in setup_of or setup_of.get(ka) != setup_of.get(kb):
                 continue
-            covered = any(
-                r["track"] > b["track"]
-                and any(r["start"] <= f < r["end"] for f in (b["start"], b["start"] - 1))
-                for r in broll)
-            if not covered:
+            if _top_at(video, b["start"] - 1) is a and _top_at(video, b["start"]) is b:
                 cuts.append((ka, kb))
     return cuts
 
 
 def runs(cam_items: list[dict], cuts: list[tuple[str, str]]) -> list[list[str]]:
-    """Maximal chains of item keys joined by visible cuts, in timeline order."""
-    nxt: dict[str, list[str]] = {}
-    has_prev = set()
+    """Maximal chains of item keys joined by visible cuts, in timeline order.
+
+    Each item appears in exactly one run. If cuts branch, the first cut (in
+    the given order) for an item as predecessor or successor wins.
+    """
+    nxt: dict[str, str] = {}
+    has_prev: set[str] = set()
     for a, b in cuts:
-        nxt.setdefault(a, []).append(b)
+        if a in nxt or b in has_prev or a == b:
+            continue
+        nxt[a] = b
         has_prev.add(b)
     out = []
+    seen: set[str] = set()
     for it in cam_items:
         k = item_key(it)
-        if k in has_prev:
+        if k in has_prev or k in seen:
             continue
         chain = [k]
-        while nxt.get(chain[-1]):
-            chain.append(nxt[chain[-1]][0])
+        while chain[-1] in nxt and nxt[chain[-1]] not in seen and nxt[chain[-1]] not in chain:
+            chain.append(nxt[chain[-1]])
+        seen.update(chain)
         out.append(chain)
     return out
