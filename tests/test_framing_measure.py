@@ -62,6 +62,13 @@ class SummarizeTest(unittest.TestCase):
         s = summarize([frame(hands=rest, joints=wrists) for _ in range(20)])
         self.assertEqual([round(v, 6) for v in s["extent"]], [0.20, HEAD[1], 0.80, HEAD[3]])
 
+    def test_extent_all_keeps_hands_at_the_bottom(self):
+        rest = [(0.20, 0.85, 0.30, 0.99)]
+        wrists = {"neck": [0.5, 0.6], "left_wrist": [0.25, 0.88]}
+        s = summarize([frame(hands=rest, joints=wrists) for _ in range(20)])
+        self.assertEqual([round(v, 6) for v in s["extent_all"]], [0.20, HEAD[1], HEAD[2], 0.99])
+        self.assertAlmostEqual(s["extent"][3], HEAD[3])
+
     def test_hand_ending_below_the_threshold_still_sets_the_bottom(self):
         low = (0.65, 0.78, 0.75, 0.92)
         wrists = {"neck": [0.5, 0.6], "right_wrist": [0.70, 0.82]}

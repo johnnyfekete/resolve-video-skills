@@ -374,6 +374,16 @@ class RestingHandsTest(Base):
         for y in meas["k"]["joints_y"].values():   # the bottom edge still avoids joints
             self.assertGreaterEqual(abs(r.bottom - y), OPTS.joint_clear * r.h - 1e-6, r)
 
+    def test_bottom_hands_gesture_turns_the_rule_off(self):
+        from solve import bottom_hands
+        meas = self.frames()
+        self.assertGreaterEqual(meas["extent_all"][3], 0.99)
+        on = self.solve({"k": meas})["rect"]
+        off = self.solve({"k": bottom_hands(meas, "gesture")})["rect"]
+        self.assertLess(on.bottom, 0.98, on)
+        self.assertGreaterEqual(off.bottom, 0.995 - 1e-6, off)   # the reaching hands stay whole
+        self.assertIs(bottom_hands(meas, None), meas)
+
     def test_raised_hand_mid_frame_still_counts_fully(self):
         meas = {"k": self.frames(raised=True)}
         self.assertAlmostEqual(meas["k"]["extent"][3], 0.68)

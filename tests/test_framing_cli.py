@@ -160,6 +160,23 @@ class SolveCliTest(unittest.TestCase):
         self.assertIn("one budget 1.33x", self.w.report())
         self.assertEqual(self.w.solution()["cuts"]["budget"], 1.3333)
 
+    def test_bottom_hands_gesture_uses_the_full_extent(self):
+        rest = {**MEASURE, "extent": [0.42, 0.3, 0.58, 0.62], "extent_all": [0.42, 0.3, 0.58, 0.99]}
+        for it in self.w.items:
+            p = self.w.root / ".edit" / "framing" / "measure" / measure._cache_name(it, Path(it["path"]))
+            p.write_text(json.dumps(rest))
+        self.w.decide()
+        self.assertEqual(self.w.solve()[0], 0)
+        loose = self.w.solution()["setups"]["A"]["zoom"]
+        d = json.loads((self.w.root / ".edit" / "framing" / "decisions.json").read_text())
+        d["setups"]["A"]["bottom_hands"] = "gesture"
+        decisions.save(self.w.root / ".edit" / "framing" / "decisions.json", d)
+        code, out = self.w.solve()
+        self.assertEqual(code, 0, out)
+        self.assertLess(self.w.solution()["setups"]["A"]["zoom"], loose)
+        r = self.w.solution()["items"]["V1@0"]["rect"]
+        self.assertGreaterEqual(r["cy"] + r["w"] / 2, 0.99 - 1e-3)   # rect height = w at 16:9
+
     def test_on_camera_matches_include_hand_framed(self):
         self.w.decide()
         self.w.solve()

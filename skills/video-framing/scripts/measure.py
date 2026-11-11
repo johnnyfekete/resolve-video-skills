@@ -27,7 +27,8 @@ RESTING = 0.93         # a hand box reaching this far down rests at the source's
 # Part of every cache key. Bump it whenever face_probe.swift or summarize changes what is measured.
 # 2: hands resting at the source's bottom edge no longer set the extent's bottom.
 # 3: the resting threshold moved from 0.98 to 0.93 of the source height.
-MEASURE_VERSION = 3
+# 4: `extent_all`, the extent with resting hands counted (for setups marked bottom_hands: gesture).
+MEASURE_VERSION = 4
 
 
 # ---------------------------------------------------------------- summaries (pure)
@@ -77,13 +78,15 @@ def summarize(frames: list[dict]) -> dict:
     does not widen it. Hands count from every frame, including frames where a gesture hides the face.
     A hand box whose bottom is at RESTING or lower rests at the source's bottom edge (on the knees or
     a table) and is already cut by the source: it counts for the left, right and top, not the bottom.
+    `extent_all` is the same with every hand counting for the bottom too (a reach toward the lens
+    also touches the bottom edge; the agent can switch a setup to it).
     With no face in any frame there is no speaker to frame, and every value is None.
     """
     seen = [f for f in frames if f.get("face")]
     detected = len(seen) / len(frames) if frames else 0.0
     if not seen:
         return {"detected": detected, "eyes": None, "face_h": None,
-                "extent": None, "joints_y": {}}
+                "extent": None, "extent_all": None, "joints_y": {}}
 
     eyes_pts = [f["eyes"] for f in seen if f.get("eyes")]
     eyes = [statistics.median(p[0] for p in eyes_pts), statistics.median(p[1] for p in eyes_pts)] \
@@ -94,13 +97,14 @@ def summarize(frames: list[dict]) -> dict:
     boxes = list(heads)
     for f in frames:
         boxes.extend(_speaker_hands(f))
-    extent = None
+    extent = extent_all = None
     if boxes:
         low = [b[3] for b in boxes if b[3] < RESTING] or [b[3] for b in heads] or [b[3] for b in boxes]
         extent = [_percentile([b[0] for b in boxes], EXTENT_LOW),
                   _percentile([b[1] for b in boxes], EXTENT_LOW),
                   _percentile([b[2] for b in boxes], EXTENT_HIGH),
                   _percentile(low, EXTENT_HIGH)]
+        extent_all = extent[:3] + [_percentile([b[3] for b in boxes], EXTENT_HIGH)]
 
     ys: dict[str, list[float]] = {}
     for f in seen:
@@ -108,7 +112,8 @@ def summarize(frames: list[dict]) -> dict:
             ys.setdefault(name, []).append(pt[1])
     joints_y = {name: statistics.median(v) for name, v in sorted(ys.items())}
 
-    return {"detected": detected, "eyes": eyes, "face_h": face_h, "extent": extent, "joints_y": joints_y}
+    return {"detected": detected, "eyes": eyes, "face_h": face_h, "extent": extent,
+            "extent_all": extent_all, "joints_y": joints_y}
 
 
 # ---------------------------------------------------------------- Vision helper

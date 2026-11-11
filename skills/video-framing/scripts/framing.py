@@ -39,7 +39,7 @@ import preview  # noqa: E402
 from geometry import Rect, rect_to_props, zoom_budget, zoom_of  # noqa: E402
 from measure import measure_items  # noqa: E402
 from setups import group_setups, signature  # noqa: E402
-from solve import Opts, setup_info_from, solve_base, solve_cuts  # noqa: E402
+from solve import Opts, bottom_hands, setup_info_from, solve_base, solve_cuts  # noqa: E402
 from timeline import _prefixes_match, hidden, item_key, on_camera, shot_prefix, visible_cuts  # noqa: E402
 
 STEP = "framing"
@@ -465,6 +465,9 @@ def run_solve(s, opt, workdir: Path) -> dict:
     cam = sorted((by_key[k] for keys in solve_keys.values() for k in keys),
                  key=lambda i: (i["start"], i["track"]))
     measures = measure_items(plan, cam, workdir)
+    for sid, keys in solve_keys.items():  # a setup marked bottom_hands: gesture keeps hands at the bottom
+        mode = data["setups"][sid].get("bottom_hands")
+        measures.update({k: bottom_hands(measures.get(k), mode) for k in keys if k in measures})
     opts, no_punch, no_push = _opts(opt)
 
     results, src_of, budgets, aspects = {}, {}, {}, []

@@ -60,6 +60,15 @@ def _strong(m: dict | None) -> bool:
     return bool(m) and m.get("detected", 0.0) >= WEAK_DETECTION and m.get("eyes") is not None
 
 
+def bottom_hands(m: dict | None, mode: str | None) -> dict | None:
+    """The measure a setup's `bottom_hands` decision asks for. "gesture": hands touching the
+    source's bottom edge count for the bottom limit too (`extent_all`), for a reach toward the lens
+    that the resting-hand rule would cut. Otherwise the measure as it is."""
+    if mode != "gesture" or not m or not m.get("extent_all"):
+        return m
+    return {**m, "extent": m["extent_all"]}
+
+
 def _extent(m: dict) -> Box:
     if m.get("extent"):
         return tuple(m["extent"])

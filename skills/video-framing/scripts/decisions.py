@@ -52,6 +52,9 @@ def validate(data: dict) -> dict:
             raise ValueError(f"setup {sid}: label is missing (plain or dynamic)")
         if label not in LABELS:
             raise ValueError(f"setup {sid}: label {label!r} must be plain or dynamic")
+        if "bottom_hands" in s and s["bottom_hands"] != "gesture":
+            raise ValueError(f"setup {sid}: bottom_hands {s['bottom_hands']!r} must be \"gesture\" "
+                             "or left out")
         for field in ("keep_out", "keep_in"):
             for n, box in enumerate(s.get(field, [])):
                 _check_box(f"setup {sid} {field}[{n}]", box)

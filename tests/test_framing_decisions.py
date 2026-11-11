@@ -143,6 +143,15 @@ class BrollSetupAndIssuesTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "issues"):
                 decisions.validate(d)
 
+    def test_bottom_hands_is_absent_or_gesture(self):
+        d = template({"A": ["V1@0"]})
+        d["setups"]["A"].update(label="dynamic", bottom_hands="gesture")
+        self.assertEqual(decisions.validate(d)["setups"]["A"]["bottom_hands"], "gesture")
+        for bad in ("resting", "", None, True):
+            d["setups"]["A"]["bottom_hands"] = bad
+            with self.assertRaisesRegex(ValueError, "setup A.*bottom_hands"):
+                decisions.validate(d)
+
     def test_merge_keeps_issues(self):
         old = template({"A": ["V1@0"]})
         old["issues"] = [{"text": "t", "where": "w"}]
