@@ -11,7 +11,7 @@ AI agent skills that edit scripted talking-head videos in DaVinci Resolve Studio
 | Set up | `video-setup` | Tools and footage checked, first timeline tracked, an `AGENTS.md` with the editing rules for that video |
 | Organise | `video-organize` | Raw files in random order → transcribed, takes found and scored per storyboard scene, b-roll catalogued, files renamed after you approve |
 | First cut | `video-assemble` | Best take per script line, b-roll placed, a list of shots still missing |
-| Pacing | `video-tighten` | Dead air removed, natural breathing room at every cut |
+| Pacing | `video-tighten` | Dead air removed, natural breathing room at every cut, pace preset per video (natural, brisk, snappy) |
 | Framing | `video-framing` | Cluttered edges cropped out, punch-ins on jump cuts, eyes stay in place across cuts, push-ins on key lines |
 | Colour | `video-color` | Correct HDR → Rec.709 conversion, one consistent grade per camera setup |
 | Sound | `video-sound` | Voice isolation, click-free cuts, YouTube loudness, music ducked under speech |

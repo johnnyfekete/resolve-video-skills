@@ -31,13 +31,15 @@ Requires the **resolve-bridge** skill installed next to this one (it finds it at
 | Air after the last word | 0.38 s | `--post` |
 | Edge may grow into silence of the same take (rescues clipped words) | up to 0.5 s | `--max-extend` |
 | Never closer than this to other sound (breath, mumble, next take) | 0.08 s | `--guard` |
-| Pauses inside a clip longer than … | 0.75 s | `--pause-max` |
-| … are shortened to | 0.3 s | `--pause-keep` |
+| Pause preset | the project's pace, else `natural` | `--pace natural\|brisk\|snappy` |
+| Pauses inside a clip longer than … | from the pace (natural: 0.75 s) | `--pause-max` |
+| … are shortened to | from the pace (natural: 0.3 s) | `--pause-keep` |
 | Never create a piece shorter than | 0.5 s | `--min-piece` |
 | Only fix edges, keep all pauses | off | `--no-pauses` |
 | Audio tracks that are not dialogue (music) | none | `--ignore-audio-tracks 3 4` |
 
 - **Speech detection** is energy-based (`resolve-bridge/scripts/rvs_audio.py`): thresholds come from the whole source file, words are found with a strong threshold and their edges grow through soft endings and attached breaths. It suits close-mic recordings. In noisy locations, check the flags more carefully.
+- **Pace** is saved per video by `video-setup --pace` and picks the two pause values: `natural` (over 0.75 s → 0.3 s), `brisk` (over 0.5 s → 0.25 s) or `snappy` (over 0.35 s → 0.18 s, also cuts gaps inside sentences). `--pause-max` and `--pause-keep` override it for one run. If the user says the cut still feels slow, suggest one pace faster as a dry run first, and protect performed pauses with `--skip`.
 - **Every shortened pause becomes a jump cut** (the clip is split). Run **video-framing** afterwards to hide them with punch-ins, or cover them with b-roll.
 - **Ripple:** later clips move up. Video-only items (b-roll, overlays) are remapped onto the new timing and shortened where their section got shorter. B-roll that would end up under 0.5 s is dropped and listed.
 - **Mode:** this is a structural step, so it uses resolve-bridge's *build*. Titles and generators on the current timeline are not carried over (the bridge warns). Run tighten before adding graphics.

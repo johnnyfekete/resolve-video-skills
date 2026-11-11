@@ -64,6 +64,7 @@ Every session starts from the latest saved state, and every step ends with a sav
 
 - Edges from measured speech: 0.22 s before the first word, 0.38 s after the last. Edges may grow up to 0.5 s into silence of the same take to rescue clipped word endings, never into other sound.
 - Pauses over 0.75 s inside a clip shortened to 0.3 s (each saves at least 0.45 s). `--skip` protects performed pauses.
+- Pace preset per video (set in `video-setup`): `natural` (default, over 0.75 s → 0.3 s), `brisk` (over 0.5 s → 0.25 s), `snappy` (over 0.35 s → 0.18 s, for short-form).
 - Ripple with b-roll remapped onto the new timing. Dry run + report first, `--apply` builds.
 - Speech detection: `resolve-bridge/scripts/rvs_audio.py` (energy-based, whole-file thresholds, hysteresis on word edges; pure Python + ffmpeg).
 - Tested on a 5:47, 65-item cut from 4K 60 fps phone footage: gave 18 edges (16 tails, 2 heads) more room where the cut was clipping or crowding a word, and flagged 2 cuts that need a different take.

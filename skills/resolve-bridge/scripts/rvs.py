@@ -39,6 +39,18 @@ PLAN_SCHEMA = "rvs.plan/1"
 STATE_SCHEMA = "rvs.state/1"
 STATE_DIR = ".edit"
 
+# Pace presets for pauses inside a take, set per video by video-setup and used by video-tighten.
+# pause_max: pauses longer than this are shortened; pause_keep: what is left of them (seconds).
+PACES = {
+    "natural": {"pause_max": 0.75, "pause_keep": 0.3,
+                "example": "only long pauses go, the sentence rhythm stays (explainers, storytelling)"},
+    "brisk": {"pause_max": 0.5, "pause_keep": 0.25,
+              "example": "thinking pauses go, breaths stay (most YouTube talking heads)"},
+    "snappy": {"pause_max": 0.35, "pause_keep": 0.18,
+               "example": "every gap trimmed to a breath, also inside sentences (TikTok, Shorts)"},
+}
+DEFAULT_PACE = "natural"
+
 RESOLVE_MODULES = {
     "darwin": "/Library/Application Support/Blackmagic Design/DaVinci Resolve/Developer/Scripting/Modules",
     "win32": os.path.expandvars(r"%PROGRAMDATA%\Blackmagic Design\DaVinci Resolve\Support\Developer\Scripting\Modules"),

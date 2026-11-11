@@ -164,12 +164,28 @@ def check_storyboard(rep: Report, config: dict, workdir: Path | None = None):
         rep.ok(path)
 
 
+def check_pace(config: dict):
+    print("Pace")
+    pace = config.get("pace")
+    name = pace if pace in rvs.PACES else rvs.DEFAULT_PACE
+    shown = name if pace else f"{name} (default, not set)"
+    print(f"  info  {shown}: {rvs.PACES[name]['example']}")
+    if pace and pace not in rvs.PACES:
+        print(f"  info  unknown pace '{pace}' recorded; tighten uses {rvs.DEFAULT_PACE}")
+
+
+def pace_help() -> str:
+    return "; ".join(f"{k}: {v['example']}" for k, v in rvs.PACES.items())
+
+
 def cmd_check(args) -> int:
     rep = Report()
     check_tools(rep)
     workdir = Path(args.workdir).resolve()
     cfg_path = workdir / rvs.STATE_DIR / "config.json"
-    check_storyboard(rep, json.loads(cfg_path.read_text()) if cfg_path.exists() else {}, workdir)
+    config = json.loads(cfg_path.read_text()) if cfg_path.exists() else {}
+    check_storyboard(rep, config, workdir)
+    check_pace(config)
     _, project = check_resolve(rep)
     if project is not None:
         check_timeline(rep, project)
@@ -202,6 +218,7 @@ def render_agents(config: dict, state: dict | None) -> str:
             ("SFX folder", config.get("sfx")),
             ("Colour look (.drx)", config.get("look")),
             ("Delivery", config.get("delivery")),
+            ("Pace", config.get("pace")),
             ("Resolve project", state.get("resolve_project") if state else None),
             ("Timeline base name", state.get("base_name") if state else None),
             ("Archive folder", state.get("archive_folder") if state else None)]
@@ -274,7 +291,7 @@ def write_agents(path: Path, block: str):
 def cmd_write(args) -> int:
     s = rvs.Session(args.workdir, connect_now=False)
     config = load_config(s)
-    for key in ("script", "storyboard", "music", "sfx", "look", "delivery"):
+    for key in ("script", "storyboard", "music", "sfx", "look", "delivery", "pace"):
         value = getattr(args, key)
         if value is not None:
             config[key] = value
@@ -331,6 +348,8 @@ def main(argv=None) -> int:
     w.add_argument("--sfx", help="sound effects folder")
     w.add_argument("--look", help="path to a .drx grade")
     w.add_argument("--delivery", help='e.g. "1080p, -14 LUFS"')
+    w.add_argument("--pace", choices=list(rvs.PACES),
+                   help=f"how hard video-tighten cuts pauses inside takes (default {rvs.DEFAULT_PACE}). " + pace_help())
     args = ap.parse_args(argv)
     try:
         return cmd_check(args) if args.cmd == "check" else cmd_write(args)

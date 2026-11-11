@@ -30,6 +30,17 @@ Run scripts as `python3 <this skill's folder>/scripts/setup.py --workdir <folder
    | Music and SFX folders? | `--music`, `--sfx` | Before the sound step |
    | A saved colour look? | `--look file.drx` | Before the colour step |
    | Delivery format? | `--delivery "1080p, -14 LUFS"` | Optional |
+   | How fast should the talking feel? (see the pace table below) | `--pace natural\|brisk\|snappy` | Optional. Default `natural` |
+
+   **Pace** sets how hard `video-tighten` cuts pauses inside a take, including pauses in the middle of a sentence. Offer the examples and suggest `natural` unless the user asks for faster. Every cut pause becomes a jump cut that `video-framing` hides.
+
+   | Pace | Pauses longer than … | are cut to … | Feels like |
+   |---|---|---|---|
+   | `natural` (default) | 0.75 s | 0.3 s | Only long pauses go and the sentence rhythm stays. Explainers, storytelling |
+   | `brisk` | 0.5 s | 0.25 s | Thinking pauses go and breaths stay. Most YouTube talking heads |
+   | `snappy` | 0.35 s | 0.18 s | Every gap is trimmed to a breath, also inside sentences. TikTok, Shorts |
+
+   The pace can be changed later by re-running `write --pace …`, or for one tighten run with `tighten.py --pace …`.
 
    Steps: organize, assemble, broll, tighten, framing, color, sound, graphics, captions, qc, deliver, shorts.
 4. **Write.**

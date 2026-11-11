@@ -30,6 +30,31 @@ except ImportError:
     sys.exit(f"resolve-bridge not found at {BRIDGE}. Install it next to this skill or set RVS_BRIDGE.")
 
 
+def resolve_pace(opt, workdir) -> str:
+    """Fill opt.pause_max / opt.pause_keep from the pace. Order: an explicit --pause-max / --pause-keep,
+    then --pace, then the pace video-setup saved in .edit/config.json, then the default. Returns where
+    the pace came from."""
+    source = "option"
+    if not opt.pace:
+        cfg_path = Path(workdir) / rvs.STATE_DIR / "config.json"
+        try:
+            saved = json.loads(cfg_path.read_text()).get("pace") if cfg_path.exists() else None
+        except ValueError:
+            saved = None
+        if saved in rvs.PACES:
+            opt.pace, source = saved, "project setting"
+        else:
+            if saved:
+                print(f"unknown pace '{saved}' in {cfg_path}; using {rvs.DEFAULT_PACE}", file=sys.stderr)
+            opt.pace, source = rvs.DEFAULT_PACE, "default"
+    preset = rvs.PACES[opt.pace]
+    if opt.pause_max is None:
+        opt.pause_max = preset["pause_max"]
+    if opt.pause_keep is None:
+        opt.pause_keep = preset["pause_keep"]
+    return source
+
+
 def plan_tighten(plan: dict, opt) -> tuple[dict, dict]:
     tl_fps = plan["timeline"]["fps"]
     items = plan["items"]
@@ -214,7 +239,9 @@ def write_report(report: dict, path: Path):
     lines = [f"# Tighten report\n",
              f"Runtime: {r['runtime']['before_s']}s -> {r['runtime']['after_s']}s "
              f"({r['runtime']['after_s'] - r['runtime']['before_s']:+.2f}s). "
-             f"{r['counts']['speech_items']} speech items, {r['counts']['pauses_cut']} pauses shortened.\n"]
+             f"{r['counts']['speech_items']} speech items, {r['counts']['pauses_cut']} pauses shortened "
+             f"(pace {r['settings'].get('pace')}: over {r['settings'].get('pause_max')}s -> "
+             f"{r['settings'].get('pause_keep')}s).\n"]
     if r["flags"]:
         lines.append("## Check these by eye/ear\n")
         lines += [f"- **{f['where']}**: {f['text']}" for f in r["flags"]]
@@ -237,8 +264,11 @@ def main(argv=None):
     ap.add_argument("--post", type=float, default=0.38, help="air after the last word (s)")
     ap.add_argument("--max-extend", type=float, default=0.5, help="max an edge may grow into silence (s)")
     ap.add_argument("--guard", type=float, default=0.08, help="min distance to neighbouring speech (s)")
-    ap.add_argument("--pause-max", type=float, default=0.75, help="pauses longer than this get shortened (s)")
-    ap.add_argument("--pause-keep", type=float, default=0.3, help="what is left of a shortened pause (s)")
+    ap.add_argument("--pace", choices=list(rvs.PACES),
+                    help="pause preset (default: the pace saved by video-setup, else natural). " +
+                         "; ".join(f"{k}: >{v['pause_max']}s -> {v['pause_keep']}s" for k, v in rvs.PACES.items()))
+    ap.add_argument("--pause-max", type=float, help="pauses longer than this get shortened (s); overrides --pace")
+    ap.add_argument("--pause-keep", type=float, help="what is left of a shortened pause (s); overrides --pace")
     ap.add_argument("--min-piece", type=float, default=0.5, help="never create a piece shorter than this (s)")
     ap.add_argument("--min-overlay", type=float, default=0.5, help="drop b-roll shorter than this after remap (s)")
     ap.add_argument("--window", type=float, default=1.0, help="audio analysed around each item (s)")
@@ -248,6 +278,8 @@ def main(argv=None):
     ap.add_argument("--ignore-audio-tracks", type=int, nargs="*", help="audio tracks that are not dialogue (music)")
     opt = ap.parse_args(argv)
 
+    source = resolve_pace(opt, opt.workdir)
+    print(f"pace {opt.pace} ({source}): pauses over {opt.pause_max}s -> {opt.pause_keep}s")
     try:
         s = rvs.Session(opt.workdir)
         s._require_state()
@@ -267,7 +299,8 @@ def main(argv=None):
         print(f"runtime {rt['before_s']}s -> {rt['after_s']}s, {report['counts']['pauses_cut']} pauses shortened, "
               f"{len(report['flags'])} flags. Report: {out / 'REPORT.md'}")
         if opt.apply:
-            summary = (f"edges {opt.pre}/{opt.post}s, {report['counts']['pauses_cut']} pauses -> {opt.pause_keep}s, "
+            summary = (f"pace {opt.pace}, edges {opt.pre}/{opt.post}s, "
+                       f"{report['counts']['pauses_cut']} pauses -> {opt.pause_keep}s, "
                        f"runtime {rt['before_s']}s -> {rt['after_s']}s")
             entry = s.build(new_plan, "tighten", summary)
             print(f"v{entry['version']:02d} saved: {entry['timeline']}")
