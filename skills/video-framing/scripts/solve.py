@@ -163,13 +163,20 @@ def _cut(r: Rect, box) -> bool:
 
 
 def _slivers(r: Rect, boxes) -> list[tuple]:
-    """Keep-out boxes that show only as a thin strip along the frame edge (a tangent)."""
+    """Keep-out boxes that show only as a thin strip along a frame edge (a tangent).
+
+    A small box wholly inside the frame is not a sliver; it is "clutter left in frame".
+    """
     out = []
     for box in boxes:
         l, t, rt, b = box
         iw = min(rt, r.right) - max(l, r.left)
         ih = min(b, r.bottom) - max(t, r.top)
-        if iw > EPS and ih > EPS and (iw < SLIVER * r.w or ih < SLIVER * r.h):
+        if iw <= EPS or ih <= EPS:
+            continue
+        thin_x = iw < SLIVER * r.w and (l <= r.left + EPS or rt >= r.right - EPS)
+        thin_y = ih < SLIVER * r.h and (t <= r.top + EPS or b >= r.bottom - EPS)
+        if thin_x or thin_y:
             out.append(box)
     return out
 
@@ -202,6 +209,19 @@ def _floors(budget: float, opts: Opts) -> tuple[float, float, bool]:
 def _face_w(g: dict, opts: Opts) -> float:
     """Narrowest width that keeps the face at most face_h_max of the frame height."""
     return g["face_h"] / opts.face_h_max * OUT_ASPECT / opts.aspect if g["face_h"] else 0.0
+
+
+def _in_band(frac: float) -> bool:
+    return EYE_BAND[0] - EPS <= frac <= EYE_BAND[1] + EPS
+
+
+def _gesture_cut(r: Rect, ext: Box) -> float:
+    """Area of the gesture extent that falls outside the rect."""
+    l, t, rt, b = ext
+    area = max(0.0, rt - l) * max(0.0, b - t)
+    iw = max(0.0, min(rt, r.right) - max(l, r.left))
+    ih = max(0.0, min(b, r.bottom) - max(t, r.top))
+    return area - iw * ih
 
 
 def _eye_frac(g: dict, r: Rect) -> float:
@@ -348,7 +368,7 @@ def _solve_group(g: dict, decision: dict, budget: float, opts: Opts) -> tuple[Re
             notes.append(f"bottom edge sits on a joint at y={r.bottom:.2f}")
 
     frac = _eye_frac(g, r)
-    if not EYE_BAND[0] - EPS <= frac <= EYE_BAND[1] + EPS:
+    if not _in_band(frac):
         notes.append(f"composition: eye line at {round(100 * frac)}% of frame height")
     return r, notes
 
@@ -366,9 +386,8 @@ def _follow(k: str, gi: dict, g: dict, rect: Rect, shift: float, keep_out, keep_
     clear clutter) is not mistaken for drift and is kept when the item pans. Size never changes.
     """
     r = rect
-    hx, hy, _, _ = _ranges(gi, rect.w, opts)
+    hx, hy_hard, _, _ = _ranges(gi, rect.w, opts)
     hx = hx or (rect.w / 2, 1 - rect.w / 2)
-    hy = hy or (rect.h / 2, 1 - rect.h / 2)
     ex, ey = gi["eyes"]
     if abs(ex - g["eyes"][0]) > opts.max_shift * rect.w + EPS:
         target = _clamp(ex + shift, *hx)
@@ -385,16 +404,29 @@ def _follow(k: str, gi: dict, g: dict, rect: Rect, shift: float, keep_out, keep_
         if _cuts(r, keep_in) > _cuts(rect, keep_in):
             flags.append({"key": k, "text": "set dressing cut at frame edge after pan follow"})
 
+    # Eye line: tilt back toward the band, but declutter, keep-in, joints and gestures come first.
+    if not _in_band(_eye_frac(gi, r)):
+        want = _clamp(_eye_frac(gi, r), EYE_HIGH, 1 / 3)
+        lo, hi = hy_hard or (r.h / 2, 1 - r.h / 2)
+        target = _clamp(ey + r.h / 2 - want * r.h, lo, hi)
+        base = (_clutter(r, keep_out), _cuts(r, keep_in), _on_joint(r, gi["joints"], opts),
+                _gesture_cut(r, gi["extent"]))
+
+        def ok(p):
+            return (_clutter(p, keep_out) <= base[0] + EPS and _cuts(p, keep_in) <= base[1]
+                    and (base[2] or not _on_joint(p, gi["joints"], opts))
+                    and _gesture_cut(p, gi["extent"]) <= base[3] + EPS)
+
+        n = 40  # full tilt first, then partway back toward the setup's position
+        for i in range(n):
+            p = Rect(r.cx, target + (r.cy - target) * i / n, r.w, r.aspect)
+            if ok(p):
+                r = p
+                break
     frac = _eye_frac(gi, r)
-    if not EYE_BAND[0] - EPS <= frac <= EYE_BAND[1] + EPS:
-        want = _clamp(frac, EYE_HIGH, 1 / 3)
-        cy = _clamp(ey + r.h / 2 - want * r.h, *hy)
-        moved = Rect(r.cx, cy, r.w, r.aspect)
-        if EYE_BAND[0] - EPS <= _eye_frac(gi, moved) <= EYE_BAND[1] + EPS:
-            r = moved
-        else:
-            flags.append({"key": k, "text": f"composition: eye line at {round(100 * frac)}% "
-                                            f"of frame height"})
+    if not _in_band(frac):
+        flags.append({"key": k, "text": f"composition: eye line at {round(100 * frac)}% "
+                                        f"of frame height"})
     return r
 
 
@@ -439,7 +471,8 @@ def solve_base(setup_items: list[str], measures: dict, decision: dict, budget: f
 
     g = group(remaining)
     rect, notes = _solve_group(g, decision, budget, opts)
-    flags.extend({"key": remaining[0], "text": n} for n in notes)
+    # The eye line is checked per item in _follow, on the frames that ship.
+    flags.extend({"key": remaining[0], "text": n} for n in notes if not n.startswith("composition:"))
     setup_shift = rect.cx - g["eyes"][0]   # off-centre shift the setup chose (keep-out), kept by pans
 
     items: dict[str, Rect] = {}

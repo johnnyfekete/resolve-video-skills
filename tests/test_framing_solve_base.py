@@ -83,13 +83,23 @@ class KeepOutTest(Base):
         self.assertFalse(res["punch_ok"])
         self.assertFalse(any("clutter" in f["text"] for f in res["flags"]))
 
+    def test_small_clutter_inside_frame_is_not_a_sliver(self):
+        box = (0.505, 0.20, 0.515, 0.25)  # tiny, wholly inside, over the head: cannot be removed
+        res = self.solve({"k": m(eyes=(0.52, 0.30))}, decision(keep_out=[box]))
+        texts = [f["text"] for f in res["flags"]]
+        self.assertTrue(any(t.startswith("clutter left in frame") for t in texts), texts)
+        self.assertFalse(any(t.startswith("clutter sliver") for t in texts), texts)
+
     def test_no_silent_keep_out_sliver_at_frame_edge(self):
         # Sweep clutter positions, gestures and budgets: any keep-out showing as a strip thinner
         # than 3% of the frame must come with a "clutter sliver at frame edge" flag.
         def strip(r, box):
             iw = min(box[2], r.right) - max(box[0], r.left)
             ih = min(box[3], r.bottom) - max(box[1], r.top)
-            return iw > 1e-9 and ih > 1e-9 and (iw < 0.03 * r.w or ih < 0.03 * r.h)
+            if iw <= 1e-9 or ih <= 1e-9:
+                return False
+            return (iw < 0.03 * r.w and (box[0] <= r.left or box[2] >= r.right)) or \
+                (ih < 0.03 * r.h and (box[1] <= r.top or box[3] >= r.bottom))
 
         checked = slivers = 0
         for budget in (1.0, 1.2, 2.0, 2.5):
@@ -187,6 +197,51 @@ class PanFollowTest(Base):
         self.assertGreater(r.cx, 0.51)  # shifted right to clear the clutter
         self.assertEqual(res["items"]["k3"], r)
         self.assertEqual(res["flags"], [])
+
+    def test_tilt_never_brings_clutter_back(self):
+        ext = (0.30, 0.12, 0.75, 0.80)
+        meas = {f"k{i}": m(eyes=(0.52, 0.36), extent=ext) for i in range(3)}
+        meas["k3"] = m(eyes=(0.52, 0.22), extent=ext)
+        box = (0, 0, 1, 0.09)
+        res = self.solve(meas, decision(keep_out=[box]))
+        rect, it = res["rect"], res["items"]["k3"]
+
+        def shown(r):
+            return max(0.0, min(box[3], r.bottom) - max(box[1], r.top)) * \
+                max(0.0, min(box[2], r.right) - max(box[0], r.left))
+
+        self.assertLessEqual(shown(it), shown(rect) + 1e-9)
+        self.assertTrue(any(f["key"] == "k3" and f["text"].startswith("composition: eye line at")
+                            for f in res["flags"]), res["flags"])
+
+    def test_tilt_without_hard_range_cuts_no_more_gesture(self):
+        # k3's own gestures do not fit the setup width vertically (no hard y range).
+        meas = {f"k{i}": m(eyes=(0.52, 0.30)) for i in range(3)}
+        meas["k3"] = m(eyes=(0.52, 0.12), extent=(0.45, 0.0, 0.60, 1.0))
+        res = solve_base(["k0", "k1", "k2"], meas, PLAIN, 2.0, OPTS)  # setup sized without k3
+        rect = res["rect"]
+        from solve import _follow, _group
+        flags = []
+        it = _follow("k3", _group([meas["k3"]]), _group([meas[k] for k in ("k0", "k1", "k2")]),
+                     rect, 0.0, [], [], OPTS, flags)
+        ext = (0.45, 0.0, 0.60, 1.0)
+
+        def cut(r):
+            iw = max(0.0, min(ext[2], r.right) - max(ext[0], r.left))
+            ih = max(0.0, min(ext[3], r.bottom) - max(ext[1], r.top))
+            return 0.15 * 1.0 - iw * ih
+
+        self.assertLessEqual(cut(it), cut(rect) + 1e-9)
+        self.assertTrue(it.inside_source())
+
+    def test_setup_eye_flag_dropped_when_every_item_ships_in_band(self):
+        # Hard-mode setup whose items each tilt back into the band at the setup size.
+        meas = {f"k{i}": m(eyes=(0.52, 0.40), extent=(0.40, 0.10, 0.64, 0.55)) for i in range(2)}
+        res = self.solve(meas)
+        for k, r in res["items"].items():
+            frac = (0.40 - r.top) / r.h
+            flagged = any(f["key"] == k and f["text"].startswith("composition") for f in res["flags"])
+            self.assertEqual(flagged, not 0.25 - 1e-6 <= frac <= 0.36 + 1e-6, (k, frac, res["flags"]))
 
     def test_item_eye_line_off_band_is_tilted_back(self):
         meas = {f"k{i}": m(eyes=(0.52, 0.30)) for i in range(3)}
