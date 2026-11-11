@@ -676,9 +676,10 @@ class ApplyTest(unittest.TestCase):
         sol = _solution([0])
         sol["issues"] = [{"text": "The plant goes with the lamp: unsure", "where": "S16_X.MOV at 02:03.00"}]
         with tempfile.TemporaryDirectory() as td:
-            _, added = apply_resolve.apply(s, sol, Path(td) / "applied.json")
+            _, added, skipped = apply_resolve.apply(s, sol, Path(td) / "applied.json")
         self.assertIn(("framing", "The plant goes with the lamp: unsure", "S16_X.MOV at 02:03.00"), s.issues)
         self.assertEqual(len(added), 2)
+        self.assertEqual(skipped, 0)
 
 
 class HiddenUnderBrollTest(unittest.TestCase):
@@ -780,7 +781,7 @@ class AgentIssuesAndScalingCliTest(unittest.TestCase):
         with mock.patch.object(framing, "_session", return_value=s), \
                 mock.patch.object(framing, "source_size", side_effect=lambda p: sizes[str(p)]), \
                 mock.patch.object(framing, "write_previews", return_value={}), \
-                mock.patch.object(apply_resolve, "apply", return_value=({"version": 2, "timeline": "T_v02"}, [])) as ap, \
+                mock.patch.object(apply_resolve, "apply", return_value=({"version": 2, "timeline": "T_v02"}, [], 0)) as ap, \
                 contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             code = framing.main(["apply", "--workdir", str(self.w.root)])
         return code, out.getvalue() + err.getvalue(), ap

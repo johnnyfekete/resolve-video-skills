@@ -51,6 +51,32 @@ class BridgeStateTest(unittest.TestCase):
         self.assertEqual(len(self.session().state["history"]), 1)
         self.assertEqual(self.session().state["history"][0]["summary"], "4 recordings")
 
+    def test_issue_same_text_different_where_is_two_issues(self):
+        s = self.session()
+        s.init_state("Demo")
+        a = s.add_issue("framing", "Check the crop", "S01 at 00:10")
+        b = s.add_issue("framing", "Check the crop", "S02 at 00:20")
+        self.assertEqual((a["id"], b["id"]), ("I1", "I2"))
+
+    def test_issue_same_text_same_where_while_open_is_one(self):
+        s = self.session()
+        s.init_state("Demo")
+        self.assertIsNotNone(s.add_issue("framing", "Check the crop", "S01 at 00:10"))
+        self.assertIsNone(s.add_issue("framing", "Check the crop", "S01 at 00:10"))
+        self.assertIsNotNone(s.add_issue("framing", "No where"))
+        self.assertIsNone(s.add_issue("framing", "No where"))
+        self.assertEqual(len(s.state["issues"]), 2)
+
+    def test_issue_can_be_raised_again_after_resolved(self):
+        s = self.session()
+        s.init_state("Demo")
+        first = s.add_issue("framing", "Check the crop", "S01 at 00:10")
+        s.resolve_issue(first["id"], "fixed")
+        again = s.add_issue("framing", "Check the crop", "S01 at 00:10")
+        self.assertIsNotNone(again)
+        self.assertNotEqual(again["id"], first["id"])
+        self.assertEqual([i["status"] for i in s.state["issues"]], ["resolved", "open"])
+
     def test_init_state_keeps_existing(self):
         s = self.session()
         s.init_state("Demo")

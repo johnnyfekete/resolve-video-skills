@@ -232,8 +232,8 @@ def _summary(solution: dict) -> str:
             f"{len(solution.get('hand_framed', []))} hand-framed left alone")
 
 
-def apply(session, solution: dict, applied_path=None) -> tuple[dict, list[dict]]:
-    """Fork, frame, push, save and record. Returns (history entry, issues added)."""
+def apply(session, solution: dict, applied_path=None) -> tuple[dict, list[dict], int]:
+    """Fork, frame, push, save and record. Returns (history entry, issues added, duplicates skipped)."""
     applied_path = Path(applied_path) if applied_path else Path(session.dir) / "framing" / "applied.json"
     pending = applied_path.with_name(applied_path.name + ".pending")
     pushes = {p["key"]: p for p in solution.get("pushes", [])}
@@ -289,13 +289,17 @@ def apply(session, solution: dict, applied_path=None) -> tuple[dict, list[dict]]
         print("framing apply failed: the step was abandoned. The forked timeline stays in Resolve for "
               "inspection; the previous version is still current.", file=sys.stderr)
         raise
-    added = []
+    added, skipped = [], 0
     for f in solution.get("flags", []) + extra:   # plain words; keys and coordinates stay in REPORT.md
         issue = session.add_issue("framing", f["text"], f.get("where"))
         if issue:
             added.append(issue)
+        else:
+            skipped += 1
     for i in solution.get("issues", []):   # the agent's uncertain calls, from decisions.json
         issue = session.add_issue("framing", i["text"], i["where"])
         if issue:
             added.append(issue)
-    return entry, added
+        else:
+            skipped += 1
+    return entry, added, skipped

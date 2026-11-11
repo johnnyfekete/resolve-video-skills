@@ -892,10 +892,13 @@ def apply(opt) -> int:
         (int(plan["timeline"]["width"]), int(plan["timeline"]["height"])))
     sol = run_solve(s, opt, workdir)
     _print_summary(sol, workdir)
-    entry, issues = apply_resolve.apply(s, sol)
+    entry, issues, skipped = apply_resolve.apply(s, sol)
     print(f"v{entry['version']:02d} saved: {entry['timeline']}")
-    if issues:
-        print(f"{len(issues)} issues added to {s.checklist_path.name}: " + ", ".join(i["id"] for i in issues))
+    if issues or skipped:
+        line = f"{len(issues)} issues added to {s.checklist_path.name}"
+        if issues:
+            line += " (" + ", ".join(i["id"] for i in issues) + ")"
+        print(line + (f", {skipped} already open" if skipped else ""))
     return 0
 
 

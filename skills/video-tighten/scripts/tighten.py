@@ -305,9 +305,13 @@ def main(argv=None):
             entry = s.build(new_plan, "tighten", summary)
             print(f"v{entry['version']:02d} saved: {entry['timeline']}")
             added = [s.add_issue("tighten", f["text"], f["where"]) for f in report["flags"]]
+            skipped = sum(1 for i in added if not i)
             added = [i for i in added if i]
-            if added:
-                print(f"{len(added)} issues added to {s.checklist_path.name}: " + ", ".join(i["id"] for i in added))
+            if added or skipped:
+                line = f"{len(added)} issues added to {s.checklist_path.name}"
+                if added:
+                    line += " (" + ", ".join(i["id"] for i in added) + ")"
+                print(line + (f", {skipped} already open" if skipped else ""))
         else:
             print("dry run: nothing changed in Resolve. Re-run with --apply to build.")
     except rvs.RvsError as e:

@@ -435,10 +435,13 @@ class Session:
         return self.checklist_path
 
     def add_issue(self, step: str, text: str, where: str | None = None) -> dict | None:
-        """Record something a person must check or fix. Duplicates (same step + text) are ignored."""
+        """Record something a person must check or fix. Returns the new issue, or None when an OPEN
+        issue with the same step, text and where (None == None) already exists. The same text on a
+        different clip is a separate issue, and a resolved issue can be raised again."""
         self._require_state()
         issues = self.state.setdefault("issues", [])
-        if any(i["step"] == step and i["text"] == text for i in issues):
+        if any(i["status"] == "open" and i["step"] == step and i["text"] == text and i.get("where") == (where or None)
+               for i in issues):
             return None
         issue = {"id": f"I{len(issues) + 1}", "step": step, "text": text, "status": "open", "created": _now()}
         if where:
