@@ -85,6 +85,26 @@ class SummarizeTest(unittest.TestCase):
         self.assertAlmostEqual(s["extent"][2], 0.70)
         self.assertAlmostEqual(s["extent"][3], HEAD[3])
 
+    # A gesturing hand 0.35 from the face centre (0.5, 0.35); its own wrist is not always found.
+    GESTURE = (0.81, 0.31, 0.89, 0.39)
+
+    def test_face_one_wrist_gesture_kept(self):
+        joints = {"neck": [0.5, 0.6], "left_wrist": [0.2, 0.8]}
+        s = summarize([frame(hands=[self.GESTURE], joints=joints) for _ in range(20)])
+        self.assertAlmostEqual(s["extent"][2], 0.89)
+
+    def test_no_face_one_wrist_gesture_kept(self):
+        joints = {"neck": [0.5, 0.6], "left_wrist": [0.2, 0.8]}
+        frames = [frame() for _ in range(10)] + \
+                 [frame(face=None, hands=[self.GESTURE], joints=joints) for _ in range(10)]
+        s = summarize(frames)
+        self.assertAlmostEqual(s["extent"][2], 0.89)
+
+    def test_two_wrists_gesture_near_its_wrist_kept(self):
+        joints = {"neck": [0.5, 0.6], "left_wrist": [0.2, 0.8], "right_wrist": [0.84, 0.38]}
+        s = summarize([frame(hands=[self.GESTURE], joints=joints) for _ in range(20)])
+        self.assertAlmostEqual(s["extent"][2], 0.89)
+
     def test_no_detections(self):
         s = summarize([frame(face=None) for _ in range(5)])
         self.assertEqual(s["detected"], 0.0)

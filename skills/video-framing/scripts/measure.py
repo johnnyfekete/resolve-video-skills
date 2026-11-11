@@ -48,8 +48,8 @@ def _speaker_hands(f: dict) -> list:
     """The frame's hand boxes that belong to the speaker, not to someone in the background.
 
     A hand counts when its centre is near a body-pose wrist. When fewer than two wrists were found,
-    a hand near the face counts too. With neither wrists nor a face there is nothing to judge by,
-    so every hand counts.
+    the hand's own wrist may be the missing one, so a hand near the face counts too, and with no face
+    to judge by every hand counts. Only with both wrists found is a hand far from both dropped.
     """
     joints = f.get("joints") or {}
     wrists = [joints[w] for w in ("left_wrist", "right_wrist") if joints.get(w)]
@@ -60,10 +60,7 @@ def _speaker_hands(f: dict) -> list:
         c = ((h[0] + h[2]) / 2, (h[1] + h[3]) / 2)
         if any(_dist(c, w) <= HAND_WRIST_MAX for w in wrists):
             keep.append(h)
-        elif len(wrists) < 2 and face_c is not None:
-            if _dist(c, face_c) <= HAND_FACE_MAX:
-                keep.append(h)
-        elif not wrists and face_c is None:
+        elif len(wrists) < 2 and (face_c is None or _dist(c, face_c) <= HAND_FACE_MAX):
             keep.append(h)
     return keep
 
