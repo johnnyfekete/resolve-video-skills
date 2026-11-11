@@ -8,6 +8,7 @@ then tightness and composition (eyes on the upper third, centred on the face).
 """
 from __future__ import annotations
 
+import math
 import statistics
 from dataclasses import dataclass
 
@@ -513,10 +514,35 @@ def solve_base(setup_items: list[str], measures: dict, decision: dict, budget: f
 
 # ---------------------------------------------------------------- punch-ins and eye trace
 #
-# setup_info: {setup_id: {"label": "plain"|"dynamic", "punch_ok": bool, "rect": Rect}}, built from
-# the decisions and solve_base. Optional keys: "outliers" (solve_base's set; an item whose width
-# differs from the setup rect is treated as an outlier too), "keep_out" and "keep_in" (the
-# decision's boxes, so a punch or an eye-trace pan never adds clutter or cuts set dressing).
+# setup_info: {setup_id: {"label": "plain"|"dynamic", "punch_ok": bool, "rect": Rect,
+#   "outliers": set[key], "keep_out": [Box], "keep_in": [Box]}}, built by setup_info_from.
+# An item whose width differs from the setup rect is treated as an outlier too (pan follow and
+# eye-line tilt never change the width). The boxes let a punch, a push or an eye-trace pan check
+# that it never adds clutter or cuts set dressing.
+
+def setup_info_from(setup_results: dict, decisions: dict) -> dict:
+    """setup_info for solve_cuts from solve_base results and per-setup decisions, both by setup id.
+
+    Each decision is the dict solve_base took: {"keep_out", "keep_in", "label", ...}.
+    """
+    out = {}
+    for sid, res in setup_results.items():
+        if sid not in decisions:
+            raise ValueError(f"no decision for setup {sid!r}")
+        d = decisions[sid]
+        out[sid] = {"label": d.get("label"), "punch_ok": bool(res["punch_ok"]), "rect": res["rect"],
+                    "outliers": set(res.get("outliers") or ()),
+                    "keep_out": [tuple(b) for b in d.get("keep_out") or []],
+                    "keep_in": [tuple(b) for b in d.get("keep_in") or []]}
+    return out
+
+
+def _info(setup_info: dict, setup_of: dict, key: str) -> dict:
+    sid = setup_of.get(key)
+    if sid not in setup_info:
+        raise ValueError(f"setup info missing for setup {sid!r} (item {key})")
+    return setup_info[sid]
+
 
 def _boxes(info: dict) -> tuple[list, list]:
     return ([tuple(b) for b in info.get("keep_out") or []],
@@ -533,9 +559,13 @@ def _grown(ext: Box, r: Rect, opts: Opts) -> Box:
 
 def _zoomed(base: Rect, m: dict, f: float, keep_out, keep_in, opts: Opts) -> Rect | None:
     """base zoomed in by f around the eyes, or None if that clips a gesture, shows outside the
-    source, cuts set dressing or leaves a clutter sliver the base frame did not have."""
+    source, cuts set dressing, leaves a clutter sliver or puts the bottom edge on a joint where
+    the base frame did not."""
     r = base.scaled(f, anchor=tuple(m["eyes"]))
     if not r.inside_source() or not r.contains(_grown(_extent(m), r, opts)):
+        return None
+    joints = sorted((m.get("joints_y") or {}).values())
+    if _on_joint(r, joints, opts) and not _on_joint(base, joints, opts):
         return None
     if _cuts(r, keep_in) > _cuts(base, keep_in) or \
             len(_slivers(r, keep_out)) > len(_slivers(base, keep_out)):
@@ -584,7 +614,7 @@ def solve_punches(runs: list[list[str]], item_rects: dict, measures: dict, setup
     out = dict(item_rects)
     flags: list[dict] = []
     for run in runs:
-        info = setup_info.get(setup_of.get(run[0])) or {}
+        info = _info(setup_info, setup_of, run[0])
         keep_out, keep_in = _boxes(info)
         setup_rect = info.get("rect")
         outliers = set(info.get("outliers") or ())
@@ -602,9 +632,7 @@ def solve_punches(runs: list[list[str]], item_rects: dict, measures: dict, setup
                 continue
             want = True  # a skipped punch restarts the alternation after it
             m = measures.get(k)
-            if not _strong(m):
-                flags.append({"key": k, "text": "punch-in skipped: speaker not detected well enough "
-                                                "to anchor it on the eyes"})
+            if not _strong(m):  # solve_base already flags weak detection
                 continue
             fmax = min(opts.punch, budget / zoom_of(base))
             if fmax < opts.punch_min - EPS:
@@ -612,13 +640,17 @@ def solve_punches(runs: list[list[str]], item_rects: dict, measures: dict, setup
                                                 f"leaves only {fmax:.2f}x under the zoom budget "
                                                 f"({budget:.2f}); minimum is {opts.punch_min:.2f}x"})
                 continue
-            factors = [fmax] + ([opts.punch_min] if fmax > opts.punch_min + EPS else [])
+            # fmax first, then 0.01 steps down, exact punch_min last: the first that fits wins.
+            factors = [fmax]
+            if fmax > opts.punch_min + EPS:
+                hi, lo = math.ceil(fmax * 100 - 1e-6) - 1, round(opts.punch_min * 100)
+                factors += [i / 100 for i in range(hi, lo, -1)] + [opts.punch_min]
             p = next((r for f in factors
                       if (r := _zoomed(base, m, f, keep_out, keep_in, opts)) is not None), None)
             if p is None:
                 flags.append({"key": k, "text": f"punch-in skipped: even {opts.punch_min:.2f}x "
-                                                f"would cut a gesture, show outside the source or "
-                                                f"cut set dressing"})
+                                                f"would cut a gesture, show outside the source, "
+                                                f"cut set dressing or end on a joint"})
                 continue
             out[k] = p
             want = False
@@ -649,9 +681,13 @@ def solve_pushes(push_ins: list[dict], plan: dict, cam_items: list[dict], setup_
     push_ins: [{"start_s", "end_s", "text", "reason"}] in timeline seconds.
     Returns ([{"key", "start_frame", "end_frame", "from", "to", "text", "reason"}], flags) with
     frames relative to the item's start. `from` is the item's rect in item_rects; `to` zooms it by
-    opts.push around the eyes. Every rule that fails drops the push with a flag.
+    opts.push around the eyes. Every rule that fails drops the push with a flag. The fast-movement
+    check uses the gesture extent of the whole item, not only the pushed range.
     """
-    fps = float((plan.get("timeline") or {}).get("fps") or 24)
+    fps = (plan.get("timeline") or {}).get("fps")
+    if not fps:
+        raise ValueError("plan has no timeline fps")
+    fps = float(fps)
     video = [i for i in plan.get("items", [])
              if i.get("media") in ("video", "both") and i.get("track") is not None
              and i.get("enabled", True) is not False]
@@ -673,7 +709,7 @@ def solve_pushes(push_ins: list[dict], plan: dict, cam_items: list[dict], setup_
                 return "empty range"
             if item is None:
                 return "the range is not inside one on-camera item (a push-in never crosses a cut)"
-            label = (setup_info.get(setup_of.get(key)) or {}).get("label")
+            label = _info(setup_info, setup_of, key).get("label")
             if label != "plain":
                 return ("the setup is labelled dynamic: it has energy already" if label == "dynamic"
                         else "the setup is not labelled plain")
@@ -697,8 +733,10 @@ def solve_pushes(push_ins: list[dict], plan: dict, cam_items: list[dict], setup_
             if r - l > opts.fast_move * base.w + EPS:
                 return (f"fast movement: gestures span {round(100 * (r - l) / base.w)}% of the "
                         f"frame width")
-            if _zoomed(base, m, opts.push, [], [], opts) is None:
-                return "the push would cut a gesture or show outside the source"
+            keep_out, keep_in = _boxes(_info(setup_info, setup_of, key))
+            if _zoomed(base, m, opts.push, keep_out, keep_in, opts) is None:
+                return ("the push would cut a gesture, show outside the source, cut set dressing "
+                        "or end on a joint")
             return None
 
         reason = why()
@@ -712,3 +750,33 @@ def solve_pushes(push_ins: list[dict], plan: dict, cam_items: list[dict], setup_
                        "text": pi.get("text", ""), "reason": pi.get("reason", "")})
         last = (pi["start_s"], key)
     return pushes, flags
+
+
+# ---------------------------------------------------------------- all cut effects
+
+def solve_cuts(plan: dict, cam_items: list[dict], cuts: list[tuple[str, str]], item_rects: dict,
+               measures: dict, setup_of: dict, setup_info: dict, push_ins: list[dict],
+               budget: float, opts: Opts) -> tuple[dict, list[dict], list[dict]]:
+    """Push-ins, punch-ins and eye trace in the right order.
+
+    item_rects are the base rects from solve_base; setup_info comes from setup_info_from.
+    Returns (rects per item, pushes, flags). A push starts from its item's final rect (eye trace
+    may have panned it); if the push no longer fits there it is dropped and the item stays base.
+    """
+    pushes, flags = solve_pushes(push_ins, plan, cam_items, setup_info, item_rects, budget, opts,
+                                 cuts, measures=measures, setup_of=setup_of)
+    rects, pflags = solve_punches(_runs(cam_items, cuts), item_rects, measures, setup_of,
+                                  setup_info, budget, opts, {p["key"] for p in pushes})
+    flags.extend(pflags)
+    kept = []
+    for p in pushes:
+        k = p["key"]
+        keep_out, keep_in = _boxes(_info(setup_info, setup_of, k))
+        to = _zoomed(rects[k], measures[k], opts.push, keep_out, keep_in, opts)
+        if to is None:
+            flags.append({"key": k, "text": f"push-in dropped ({p['text']!r}): after eye trace the "
+                                            f"push would cut a gesture, show outside the source, "
+                                            f"cut set dressing or end on a joint"})
+            continue
+        kept.append({**p, "from": rects[k], "to": to})
+    return rects, kept, flags

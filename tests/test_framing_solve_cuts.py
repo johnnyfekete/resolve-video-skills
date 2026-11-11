@@ -6,7 +6,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "skills" / "video-framing" / "scripts"))
 
 from geometry import Rect, zoom_of  # noqa: E402
-from solve import Opts, solve_punches, solve_pushes  # noqa: E402
+from solve import Opts, setup_info_from, solve_cuts, solve_punches, solve_pushes  # noqa: E402
 from timeline import item_key  # noqa: E402
 
 OPTS = Opts()
@@ -16,9 +16,9 @@ BASE = Rect(0.52, 0.30 + 0.65 / 6, 0.65)
 SMALL = (0.45, 0.17, 0.59, 0.43)
 
 
-def m(eyes=EYES, extent=SMALL, detected=1.0):
+def m(eyes=EYES, extent=SMALL, detected=1.0, joints=None):
     return {"detected": detected, "eyes": list(eyes), "face_h": 0.12,
-            "extent": list(extent), "joints_y": {}}
+            "extent": list(extent), "joints_y": dict(joints or {})}
 
 
 def screen_x(rect, eyes):
@@ -95,7 +95,7 @@ class PunchRectTest(Punches):
         self.assertLess(abs(sy - (EYES[1] - BASE.top) / BASE.h), 0.001)
 
     def test_hand_clipped_at_115_fits_at_110(self):
-        ext = (0.45, 0.17, 0.795, 0.43)
+        ext = (0.45, 0.17, 0.801, 0.43)  # fits only at exactly 1.10
         out, flags = self.solve(["a", "b"], measures={"a": m(extent=ext), "b": m(extent=ext)})
         self.assertAlmostEqual(BASE.w / out["b"].w, OPTS.punch_min, places=6)
         self.assertEqual(flags, [])
@@ -127,6 +127,26 @@ class PunchRectTest(Punches):
         self.assertEqual(len(flags), 1)
         self.assertIn("budget", flags[0]["text"])
 
+    def test_punch_steps_down_off_a_joint(self):
+        # A joint 0.012 above the 1.15 punch's bottom edge (0.677): 1.15 and 1.14 end on it.
+        meas = {k: m(joints={"elbow": 0.665}) for k in ("a", "b")}
+        out, flags = self.solve(["a", "b"], measures=meas)
+        self.assertAlmostEqual(BASE.w / out["b"].w, 1.13, places=6)
+        self.assertGreater(abs(out["b"].bottom - 0.665), OPTS.joint_clear * out["b"].h)
+        self.assertEqual(flags, [])
+
+    def test_weak_detection_is_not_punched_and_not_reflagged(self):
+        keys = ["a", "b", "c"]
+        meas = {"a": m(), "b": m(detected=0.3), "c": m()}
+        out, flags = self.solve(keys, measures=meas)
+        self.assertEqual(self.slots(out, keys), ["base", "base", "punch"])
+        self.assertEqual(flags, [])
+
+    def test_missing_setup_info_raises(self):
+        with self.assertRaisesRegex(ValueError, "setup info missing"):
+            solve_punches([["a", "b"]], {"a": BASE, "b": BASE}, {"a": m(), "b": m()},
+                          {"a": "s1", "b": "s1"}, {}, 2.0, OPTS, set())
+
     def test_punch_does_not_cut_keep_in(self):
         # A lamp fully in the base frame but straddling the 1.15 and 1.10 punch edges.
         lamp = (0.20, 0.50, 0.26, 0.60)
@@ -151,6 +171,27 @@ class EyeTraceTest(Punches):
         out, _ = self.solve(["a", "b"], measures=meas)
         self.assertLess(out["b"].w, BASE.w)
         self.assertLess(abs(screen_x(out["b"], eyes_b) - screen_x(out["a"], EYES)), 0.03)
+
+    def test_three_item_chain_follows_the_corrected_frame(self):
+        off = (EYES[0] + 0.05 * BASE.w, EYES[1])
+        ext = (0.48, 0.17, 0.62, 0.43)
+        meas = {"a": m(), "b": m(eyes=off, extent=ext), "c": m(eyes=off, extent=ext)}
+        out, _ = self.solve(["a", "b", "c"], measures=meas, sinfo={"s1": info(punch_ok=False)})
+        self.assertNotEqual(out["b"], BASE)
+        self.assertLess(abs(screen_x(out["b"], off) - screen_x(out["a"], EYES)), 0.03)
+        self.assertLess(abs(screen_x(out["c"], off) - screen_x(out["b"], off)), 0.03)
+        self.assertNotEqual(out["c"], BASE)  # c matched to b's corrected frame, not to its base
+
+    def test_pan_that_would_cut_a_gesture_is_left_and_flagged(self):
+        eyes_b = (EYES[0] - 0.05 * BASE.w, EYES[1])
+        # A hand just inside the right edge: any pan left would cut it.
+        meas = {"a": m(), "b": m(eyes=eyes_b, extent=(0.42, 0.17, 0.83, 0.43))}
+        out, flags = self.solve(["a", "b"], measures=meas, sinfo={"s1": info(punch_ok=False)})
+        self.assertLess(abs(out["b"].cx - BASE.cx), 0.001)  # only the margin's slack is used
+        g = 0.83 + OPTS.gesture_margin * BASE.h / OPTS.aspect
+        self.assertLessEqual(g, out["b"].right + 1e-9)
+        eye = [f for f in flags if "eye" in f["text"]]
+        self.assertEqual([f["key"] for f in eye], ["b"])
 
     def test_shift_that_would_add_clutter_is_left_and_flagged(self):
         eyes_b = (EYES[0] - 0.05 * BASE.w, EYES[1])
@@ -184,13 +225,13 @@ def push(start_s, end_s, text="line"):
 
 class Pushes(unittest.TestCase):
     def solve(self, push_ins, items, broll=(), label="plain", budget=2.0, rects=None,
-              measures=None, cuts=None):
+              measures=None, cuts=None, keep_in=()):
         cam = list(items)
         keys = [item_key(i) for i in cam]
         p = plan(*cam, *broll)
         if cuts is None:
             cuts = [(item_key(a), item_key(b)) for a, b in zip(cam, cam[1:]) if a["end"] == b["start"]]
-        return solve_pushes(push_ins, p, cam, {"s1": info(label=label)},
+        return solve_pushes(push_ins, p, cam, {"s1": info(label=label, keep_in=list(keep_in))},
                             rects or {k: BASE for k in keys}, budget, OPTS, cuts,
                             measures=measures or {k: m() for k in keys},
                             setup_of={k: "s1" for k in keys})
@@ -261,12 +302,67 @@ class PushTest(Pushes):
         self.assertEqual(pushes, [])
         self.assertIn("budget", flags[0]["text"])
 
+    def test_push_that_would_cut_set_dressing_dropped(self):
+        lamp = (0.20, 0.50, 0.25, 0.60)  # inside the base frame, across the 1.06 push's left edge
+        pushes, flags = self.solve([push(10, 15)], self.ONE, keep_in=[lamp])
+        self.assertEqual(pushes, [])
+        self.assertIn("set dressing", flags[0]["text"])
+
+    def test_push_that_would_cut_a_gesture_dropped(self):
+        pushes, flags = self.solve([push(10, 15)], self.ONE,
+                                   measures={"V1@0": m(extent=(0.45, 0.17, 0.82, 0.43))})
+        self.assertEqual(pushes, [])
+        self.assertIn("gesture", flags[0]["text"])
+
+    def test_speaker_not_detected_dropped(self):
+        pushes, flags = self.solve([push(10, 15)], self.ONE, measures={"V1@0": m(detected=0.3)})
+        self.assertEqual(pushes, [])
+        self.assertIn("not detected", flags[0]["text"])
+
+    def test_missing_fps_raises(self):
+        cam = self.ONE
+        with self.assertRaisesRegex(ValueError, "fps"):
+            solve_pushes([push(10, 15)], {"items": cam}, cam, {"s1": info()}, {"V1@0": BASE}, 2.0,
+                         OPTS, [], measures={"V1@0": m()}, setup_of={"V1@0": "s1"})
+
     def test_fast_movement_dropped(self):
         wide = (0.15, 0.17, 0.85, 0.80)
         pushes, flags = self.solve([push(10, 15)], self.ONE, rects={"V1@0": Rect(0.5, 0.5, 1.0)},
                                    measures={"V1@0": m(extent=wide)})
         self.assertEqual(pushes, [])
         self.assertIn("movement", flags[0]["text"])
+
+
+class SolveCutsTest(unittest.TestCase):
+    def test_push_starts_from_the_eye_traced_frame(self):
+        items = [vid("S1_a.mov", 1, 0, 40 * FPS), vid("S1_b.mov", 1, 40 * FPS, 100 * FPS)]
+        ka, kb = "V1@0", "V1@1000"
+        off = (EYES[0] + 0.05 * BASE.w, EYES[1])
+        meas = {ka: m(), kb: m(eyes=off, extent=(0.48, 0.17, 0.62, 0.43))}
+        setup_of = {ka: "s1", kb: "s1"}
+        sinfo = setup_info_from({"s1": {"rect": BASE, "items": {ka: BASE, kb: BASE}, "flags": [],
+                                        "punch_ok": True, "outliers": set()}},
+                                {"s1": {"keep_out": [], "keep_in": [], "label": "plain"}})
+        rects, pushes, flags = solve_cuts(plan(*items), items, [(ka, kb)], {ka: BASE, kb: BASE},
+                                          meas, setup_of, sinfo, [push(50, 55)], 2.0, OPTS)
+        self.assertEqual(rects[kb].w, BASE.w)          # the push item is not punched...
+        self.assertNotEqual(rects[kb], BASE)           # ...but it is eye-traced
+        self.assertEqual(len(pushes), 1, flags)
+        p = pushes[0]
+        self.assertEqual(p["from"], rects[kb])
+        self.assertAlmostEqual(p["to"].w, rects[kb].w / OPTS.push, places=9)
+        self.assertLess(abs(screen_x(p["to"], off) - screen_x(p["from"], off)), 1e-9)
+        self.assertLess(abs(screen_x(rects[kb], off) - screen_x(rects[ka], EYES)), 0.03)
+
+    def test_setup_info_from_fills_every_key(self):
+        res = {"rect": BASE, "items": {}, "flags": [], "punch_ok": False, "outliers": {"x"}}
+        dec = {"keep_out": [[0, 0, 0.1, 0.1]], "keep_in": [], "label": "dynamic", "reason": "r"}
+        si = setup_info_from({"s1": res}, {"s1": dec})
+        self.assertEqual(si["s1"], {"label": "dynamic", "punch_ok": False, "rect": BASE,
+                                    "outliers": {"x"}, "keep_out": [(0, 0, 0.1, 0.1)],
+                                    "keep_in": []})
+        with self.assertRaises(ValueError):
+            setup_info_from({"s1": res}, {})
 
 
 if __name__ == "__main__":
