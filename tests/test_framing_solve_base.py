@@ -164,6 +164,8 @@ class OutlierTest(Base):
         for k in ("k0", "k1", "k2", "k3"):
             self.assertEqual(res["items"][k], res["rect"])
         self.assertEqual([f["key"] for f in res["flags"]], ["k4"])
+        self.assertEqual(res["outliers"], {"k4"})
+        self.assertEqual(four["outliers"], set())
 
 
 class CompositionTest(Base):
