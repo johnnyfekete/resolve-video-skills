@@ -3,6 +3,7 @@ ffmpeg or Resolve (fake measures go straight into the measure cache)."""
 import contextlib
 import io
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -512,6 +513,31 @@ class ApplyTest(unittest.TestCase):
             self.assertFalse((Path(td) / "applied.json").exists())
             self.assertFalse((Path(td) / "applied.json.pending").exists())
         self.assertEqual(s.calls[-1], ("abandon",))
+
+    def test_failure_after_finish_keeps_the_step_and_the_pending_record(self):
+        items = [FakeItem("S01_A.MOV", 86400)]
+        s = FakeSession(FakeTimeline(items))
+        real = os.replace
+
+        def replace(src, dst):
+            if str(src).endswith(".pending"):
+                raise OSError("disk full")
+            return real(src, dst)
+
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "applied.json"
+            with mock.patch.object(apply_resolve.os, "replace", side_effect=replace), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(apply_resolve.ApplyError) as cm:
+                    apply_resolve.apply(s, _solution([0]), path)
+            self.assertTrue(path.with_name("applied.json.pending").exists())
+            self.assertFalse(path.exists())
+            # the next run finds the record
+            self.assertIn("/a.mov|0|240", decisions.load_applied(path))
+        self.assertNotIn(("abandon",), s.calls)
+        self.assertEqual([c[0] for c in s.calls], ["begin", "finish"])
+        self.assertIn("applied.json.pending", str(cm.exception))
+        self.assertIn("saved", str(cm.exception))
 
     def test_missing_item_abandons(self):
         s = FakeSession(FakeTimeline([FakeItem("S01_A.MOV", 86400)]))

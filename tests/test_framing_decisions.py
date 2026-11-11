@@ -1,3 +1,6 @@
+import contextlib
+import io
+import os
 import sys
 import tempfile
 import unittest
@@ -92,6 +95,15 @@ class HandFramedTest(unittest.TestCase):
         applied = {match_key(it): {"props": {}, "fusion_comps": 0}}
         self.assertEqual(hand_framed([it], applied), {"V1@0"})
 
+    def test_rerun_own_push_in_comp_is_not_hand(self):
+        # framing's own push-in from the last run: one comp in the plan, one recorded, same props.
+        z = {"ZoomX": 1.4, "ZoomY": 1.4, "Pan": 12.0, "Tilt": -3.0}
+        it = item(props=dict(z), comps=1)
+        applied = {match_key(it): {"props": dict(z), "fusion_comps": 1}}
+        self.assertEqual(hand_framed([it], applied), set())
+        # a second comp (the user's) on top of it is a hand edit
+        self.assertEqual(hand_framed([item(props=dict(z), comps=2)], applied), {"V1@0"})
+
     def test_rippled_item_still_matched(self):
         applied = {match_key(item(start=0, end=100)): {"props": {"ZoomX": 1.15, "ZoomY": 1.15}, "fusion_comps": 0}}
         moved = item(start=500, end=600, props={"ZoomX": 1.15, "ZoomY": 1.15})
@@ -182,6 +194,43 @@ class PushStillMatchesTest(unittest.TestCase):
     def test_repeated_words_need_repeats(self):
         words = [(0.0, 0.5, "very"), (0.6, 1.0, "good")]
         self.assertFalse(decisions.push_still_matches("very very very good", words, 0.0, 1.0))
+
+
+class PendingAppliedTest(unittest.TestCase):
+    def setUp(self):
+        self._td = tempfile.TemporaryDirectory()
+        self.path = Path(self._td.name) / "applied.json"
+        self.pending = self.path.with_name("applied.json.pending")
+
+    def tearDown(self):
+        self._td.cleanup()
+
+    def _load(self):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            return decisions.load_applied(self.path), err.getvalue()
+
+    def test_newer_pending_record_is_promoted_with_a_warning(self):
+        self.path.write_text(json.dumps({"old": {}}))
+        self.pending.write_text(json.dumps({"new": {}}))
+        os.utime(self.path, (1000, 1000))
+        data, err = self._load()
+        self.assertEqual(data, {"new": {}})
+        self.assertFalse(self.pending.exists())
+        self.assertIn("pending", err)
+
+    def test_pending_record_without_applied_is_promoted(self):
+        self.pending.write_text(json.dumps({"new": {}}))
+        data, err = self._load()
+        self.assertEqual(data, {"new": {}})
+        self.assertTrue(self.path.exists())
+
+    def test_older_pending_record_is_ignored(self):
+        self.pending.write_text(json.dumps({"stale": {}}))
+        self.path.write_text(json.dumps({"current": {}}))
+        os.utime(self.pending, (1000, 1000))
+        data, _ = self._load()
+        self.assertEqual(data, {"current": {}})
 
 
 if __name__ == "__main__":

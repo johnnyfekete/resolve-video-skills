@@ -10,6 +10,7 @@ import json
 import math
 import os
 import re
+import sys
 import tempfile
 from collections import Counter
 from pathlib import Path
@@ -181,5 +182,12 @@ def save_applied(path, entries: dict) -> None:
 
 
 def load_applied(path) -> dict | None:
+    """The applied record. A leftover `<name>.pending` newer than it (an apply that saved and
+    recorded its step, then failed to rename the record) is promoted first, with a warning."""
     p = Path(path)
+    pending = p.with_name(p.name + ".pending")
+    if pending.exists() and (not p.exists() or pending.stat().st_mtime > p.stat().st_mtime):
+        print(f"warning: {pending.name} is newer than {p.name}: a framing apply saved its step but "
+              f"did not finish the record; using it as {p.name}.", file=sys.stderr)
+        os.replace(pending, p)
     return json.loads(p.read_text()) if p.exists() else None

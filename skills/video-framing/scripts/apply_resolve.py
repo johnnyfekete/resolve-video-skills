@@ -240,6 +240,7 @@ def apply(session, solution: dict, applied_path=None) -> tuple[dict, list[dict]]
     tl_fps = float((solution.get("timeline") or {}).get("fps") or 24.0)
     extra: list[dict] = []
     tl = session.begin_step("framing")
+    finished = False
     try:
         index = _index(tl)
         entries = {}
@@ -273,8 +274,15 @@ def apply(session, solution: dict, applied_path=None) -> tuple[dict, list[dict]]
         applied = _applied(applied_path, solution, entries)
         dec.save_applied(pending, applied)   # survives a failure right after finish_step
         entry = session.finish_step(_summary(solution))
+        finished = True
         os.replace(pending, applied_path)
-    except BaseException:
+    except BaseException as e:
+        if finished:   # saved and recorded: never abandon it; the pending record is the applied one
+            raise ApplyError(
+                f"the framing step was saved and recorded, but {applied_path.name} could not be "
+                f"written ({e}). Its record is kept in {pending}: the next framing run picks it up "
+                f"(or rename it to {applied_path.name}). Checklist issues for this step were not "
+                f"added; check the report.") from e
         if pending.exists():
             pending.unlink()
         session.abandon_step()
