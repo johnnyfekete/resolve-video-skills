@@ -282,12 +282,8 @@ def apply(session, solution: dict, applied_path=None) -> tuple[dict, list[dict]]
               "inspection; the previous version is still current.", file=sys.stderr)
         raise
     added = []
-    for f in solution.get("flags", []) + extra:
-        if len(f.get("keys") or []) > 1 and f.get("setup"):
-            who = f"setup {f['setup']}"
-        else:
-            who = f.get("key") or (f"setup {f['setup']}" if f.get("setup") else "timeline")
-        issue = session.add_issue("framing", f"{who}: {f['text']}", f.get("where"))
+    for f in solution.get("flags", []) + extra:   # plain words; keys and coordinates stay in REPORT.md
+        issue = session.add_issue("framing", f["text"], f.get("where"))
         if issue:
             added.append(issue)
     for i in solution.get("issues", []):   # the agent's uncertain calls, from decisions.json

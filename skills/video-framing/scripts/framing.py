@@ -560,10 +560,9 @@ def _flag_where(f: dict, by_key: dict, setups: dict, fps: float, video: list[dic
         if it:
             return f"{it.get('clip')} at {tc(fr / fps)}"
         return f"timeline at {tc(fr / fps)}"
-    sid = f.get("setup")
-    keys = setups.get(sid) or []
-    if keys:
-        return f"setup {sid}: {_where(by_key[keys[0]], fps)}"
+    keys = [k for k in setups.get(f.get("setup")) or [] if k in by_key]
+    if keys:   # a setup-level flag: the setup's first clip on the timeline
+        return _where(min((by_key[k] for k in keys), key=lambda i: (i["start"], i.get("track", 0))), fps)
     return "timeline"
 
 
@@ -610,6 +609,8 @@ def _solution(plan, s, data, setups, solve_keys, results, rects, pushes, flags, 
     for f in flags:
         o = {"key": f.get("key"), "setup": f.get("setup"), "text": f["text"],
              "where": _flag_where(f, by_key, setups, fps, video)}
+        if f.get("detail") and f["detail"] != f["text"]:
+            o["detail"] = f["detail"]
         if f.get("attempt") is not None:
             o["attempt"] = _rect_json(f["attempt"])
         out_flags.append(o)
@@ -640,7 +641,8 @@ def _solution(plan, s, data, setups, solve_keys, results, rects, pushes, flags, 
 def merge_flags(flags: list[dict]) -> list[dict]:
     """Fewer, merged flags. Every "punch-in skipped" flag of a setup becomes one flag with its
     reasons counted; flags of one setup with the same text become one. A merged flag keeps the
-    first flag's key, where and attempt, lists every place in its text and every key in "keys"."""
+    first flag's key, where and attempt, lists every place in its text and every key in "keys".
+    Raw details (coordinates, keys) of the merged flags are kept in "detail" for the report."""
     groups: dict[tuple, list[dict]] = {}
     for f in flags:
         k = ("punch", f.get("setup")) if f["text"].startswith(PUNCH_SKIP) else ("same", f.get("setup"), f["text"])
@@ -650,14 +652,19 @@ def merge_flags(flags: list[dict]) -> list[dict]:
         first, n = fs[0], len(fs)
         if k[0] == "punch":
             reasons = Counter(f["text"][len(PUNCH_SKIP):] for f in fs)
-            text = (f"{n} punch-in{'s' if n > 1 else ''} skipped on setup {k[1]}: "
+            text = (f"{n} punch-in{'s' if n > 1 else ''} skipped: "
                     + "; ".join(f"{r} ({c}x)" for r, c in reasons.items())
                     + ". At " + ", ".join(f["where"] for f in fs))
         elif n > 1:
             text = f"{first['text']} (on {n} items: {', '.join(f['where'] for f in fs)})"
         else:
             text = first["text"]
-        out.append({**first, "text": text, "keys": [f.get("key") for f in fs]})
+        merged = {**first, "text": text, "keys": [f.get("key") for f in fs]}
+        merged.pop("detail", None)
+        details = list(dict.fromkeys(f["detail"] for f in fs if f.get("detail")))
+        if details:
+            merged["detail"] = "; ".join(details)
+        out.append(merged)
     return out
 
 
@@ -786,6 +793,8 @@ def write_report(sol: dict, data: dict, path: Path, previews: dict) -> None:
         for n, f in enumerate(sol["flags"], 1):
             pv = f" (preview: flags/{n}.jpg)" if n in previews.get("flags", {}) else ""
             L.append(f"{n}. **{f['where']}**: {f['text']}{pv}")
+            if f.get("detail"):
+                L.append(f"   - Detail: {f['detail']}")
     else:
         L.append("None.")
     path.write_text("\n".join(L) + "\n")

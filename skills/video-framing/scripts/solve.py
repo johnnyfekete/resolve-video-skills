@@ -88,6 +88,7 @@ def _group(ms: list[dict]) -> dict:
                    max(e[2] for e in exts), max(e[3] for e in exts)),
         "face_h": statistics.median(faces) if faces else None,
         "joints": sorted({y for m in ms for y in (m.get("joints_y") or {}).values()}),
+        "joint_names": [(n, y) for m in ms for n, y in sorted((m.get("joints_y") or {}).items())],
     }
 
 
@@ -270,12 +271,86 @@ def _fmt(box) -> str:
     return "(" + ", ".join(f"{v:.2f}" for v in box) + ")"
 
 
+# Flags carry a short `text` in plain words for the checklist and a `detail` with the raw
+# coordinates for REPORT.md (only when it says more than the text).
+
+def _flag(key, text: str, detail: str | None = None) -> dict:
+    f = {"key": key, "text": text}
+    if detail and detail != text:
+        f["detail"] = detail
+    return f
+
+
+def _note(text: str, detail: str | None = None) -> dict:
+    return {"text": text, "detail": detail or text}
+
+
+_EDGE_ORDER = ("left", "top", "right", "bottom")
+
+
+def _edges(r: Rect, box) -> list[str]:
+    """The frame edges a box crosses (it reaches past them), in the order left, top, right, bottom.
+    A box spanning the frame along one edge names only the edge it sits at; a box wholly inside the
+    frame gets its nearest edge."""
+    l, t, rt, b = box
+    out = []
+    if l < r.left - EPS < rt:
+        out.append("left")
+    if t < r.top - EPS < b:
+        out.append("top")
+    if l < r.right + EPS < rt:
+        out.append("right")
+    if t < r.bottom + EPS < b:
+        out.append("bottom")
+    # A box spanning the whole frame height sits at the left or right edge, not the top and bottom.
+    if {"top", "bottom"} <= set(out) and {"left", "right"} & set(out):
+        out = [e for e in out if e not in ("top", "bottom")]
+    if {"left", "right"} <= set(out) and {"top", "bottom"} & set(out):
+        out = [e for e in out if e not in ("left", "right")]
+    if out:
+        return out
+    gaps = {"left": l - r.left, "top": t - r.top, "right": r.right - rt, "bottom": r.bottom - b}
+    return [min(_EDGE_ORDER, key=lambda e: gaps[e])]
+
+
+def _edge_words(names) -> str:
+    names = [e for e in _EDGE_ORDER if e in set(names)]
+    if len(names) == 1:
+        return f"the {names[0]} edge"
+    return "the " + ", ".join(names[:-1]) + f" and {names[-1]} edges"
+
+
+_JOINT_WORDS = {"elbow": "elbows", "wrist": "wrists", "knee": "knees", "shoulder": "shoulders",
+                "hip": "waist", "neck": "neck", "nose": "nose", "root": "waist"}
+
+
+def _joint_word(name: str) -> str:
+    """A body-pose joint name in plain words: left_elbow -> elbows."""
+    base = name.removeprefix("left_").removeprefix("right_")
+    for k, word in _JOINT_WORDS.items():
+        if base.startswith(k):
+            return word
+    return base.replace("_", " ")
+
+
+def _joint_at(r: Rect, named, opts: Opts) -> str | None:
+    """Name of the joint nearest the bottom edge among those it sits on, or None."""
+    on = [(abs(r.bottom - y), n) for n, y in named if abs(r.bottom - y) < opts.joint_clear * r.h]
+    return min(on)[1] if on else None
+
+
+def _eye_text(frac: float) -> str:
+    where = "low" if frac > EYE_BAND[1] else "high"
+    return f"eye line {where} ({round(100 * frac)}% of frame height)"
+
+
 # ---------------------------------------------------------------- one frame for a group of items
 
-def _solve_group(g: dict, decision: dict, budget: float, opts: Opts) -> tuple[Rect, list[str]]:
+def _solve_group(g: dict, decision: dict, budget: float, opts: Opts) -> tuple[Rect, list[dict]]:
+    """The frame for a group of items and its notes ({"text", "detail"}: plain words, raw values)."""
     floor, ko_floor, _ = _floors(budget, opts)
     wmax = _w_max(opts)
-    notes: list[str] = []
+    notes: list[dict] = []
     keep_out = [tuple(b) for b in decision.get("keep_out") or []]
     keep_in = [tuple(b) for b in decision.get("keep_in") or []]
 
@@ -286,7 +361,8 @@ def _solve_group(g: dict, decision: dict, budget: float, opts: Opts) -> tuple[Re
     if r is None:  # the gestures do not fit even the widest frame: centre it, flag below
         h = _h(w, opts)
         r = Rect(_clamp(g["eyes"][0], w / 2, 1 - w / 2), _clamp(0.5, h / 2, 1 - h / 2), w, opts.aspect)
-        notes.append(f"gestures {_fmt(g['extent'])} do not fit the widest frame")
+        notes.append(_note("gestures do not fit even the widest frame: check for cut hands",
+                           f"gestures {_fmt(g['extent'])} do not fit the widest frame"))
         return r, notes
 
     # Keep-out: shift within the allowance, then tighten; the gesture-safe frame wins otherwise.
@@ -316,13 +392,20 @@ def _solve_group(g: dict, decision: dict, budget: float, opts: Opts) -> tuple[Re
             reason = "budget" if first_clear(tighter) else "gestures"
         r = best
         if reason:
-            boxes = ", ".join(_fmt(b) for b in keep_out if _clutter(r, [b]) > EPS)
-            notes.append("clutter left in frame: keep-out " + boxes + {
+            left = [b for b in keep_out if _clutter(r, [b]) > EPS]
+            edges = _edge_words([e for b in left for e in _edges(r, b)])
+            boxes = ", ".join(_fmt(b) for b in left)
+            notes.append(_note(f"clutter left at {edges}: " + {
+                "gestures": "removing it would cut a gesture or put the speaker off centre; "
+                            "gestures kept",
+                "budget": f"removing it needs more zoom than the source allows (zoom budget "
+                          f"{budget:.2f})",
+            }[reason], "clutter left in frame: keep-out " + boxes + {
                 "gestures": " cannot be removed without cutting gestures or going off centre; "
                             "gestures kept",
                 "budget": f" needs more zoom than the source allows (zoom budget {budget:.2f}, "
                           f"declutter up to {1 / ko_floor:.2f}x); not a gesture problem",
-            }[reason])
+            }[reason]))
 
     # Keep-in: never a sliver on the edge. Include it whole, else exclude it clearly.
     if keep_in and _cuts(r, keep_in):
@@ -346,8 +429,10 @@ def _solve_group(g: dict, decision: dict, budget: float, opts: Opts) -> tuple[Re
         if found:
             r = found
         else:
-            notes.append("set dressing cut at frame edge: keep-in "
-                         + ", ".join(_fmt(b) for b in cut_now))
+            notes.append(_note("chosen set dressing cut at "
+                               + _edge_words([e for b in cut_now for e in _edges(r, b)]),
+                               "set dressing cut at frame edge: keep-in "
+                               + ", ".join(_fmt(b) for b in cut_now)))
 
     # Joints: the bottom edge cuts between joints. Change size first, then position.
     if g["joints"] and _on_joint(r, g["joints"], opts):
@@ -379,11 +464,14 @@ def _solve_group(g: dict, decision: dict, budget: float, opts: Opts) -> tuple[Re
         if found:
             r = found
         else:
-            notes.append(f"bottom edge sits on a joint at y={r.bottom:.2f}")
+            name = _joint_at(r, g.get("joint_names") or [], opts)
+            notes.append(_note(f"bottom edge on the {_joint_word(name)}" if name
+                               else "bottom edge on a joint",
+                               f"bottom edge sits on a joint ({name or 'unnamed'}) at y={r.bottom:.2f}"))
 
     frac = _eye_frac(g, r)
     if not _in_band(frac):
-        notes.append(f"composition: eye line at {round(100 * frac)}% of frame height")
+        notes.append(_note(_eye_text(frac)))
     return r, notes
 
 
@@ -413,10 +501,11 @@ def _follow(k: str, gi: dict, g: dict, rect: Rect, shift: float, keep_out, keep_
                   and _clutter(Rect(x, rect.cy, rect.w, rect.aspect), keep_out) <= base_c + EPS), target)
         r = Rect(x, rect.cy, rect.w, rect.aspect)
         if _clutter(r, keep_out) > base_c + EPS:
-            flags.append({"key": k, "text": "clutter left in frame: panning to follow the "
-                                            "speaker brings keep-out back in"})
+            flags.append({"key": k, "text": "clutter back in frame where the frame pans to follow "
+                                            "the speaker"})
         if _cuts(r, keep_in) > _cuts(rect, keep_in):
-            flags.append({"key": k, "text": "set dressing cut at frame edge after pan follow"})
+            flags.append({"key": k, "text": "chosen set dressing cut at the frame edge where the "
+                                            "frame pans to follow the speaker"})
 
     # Eye line: tilt back toward the band, but declutter, keep-in, joints and gestures come first.
     if not _in_band(_eye_frac(gi, r)):
@@ -439,8 +528,7 @@ def _follow(k: str, gi: dict, g: dict, rect: Rect, shift: float, keep_out, keep_
                 break
     frac = _eye_frac(gi, r)
     if not _in_band(frac):
-        flags.append({"key": k, "text": f"composition: eye line at {round(100 * frac)}% "
-                                        f"of frame height"})
+        flags.append({"key": k, "text": _eye_text(frac)})
     return r
 
 
@@ -497,7 +585,8 @@ def solve_base(setup_items: list[str], measures: dict, decision: dict, budget: f
     g = group(remaining)
     rect, notes = _solve_group(g, decision, budget, opts)
     # The eye line is checked per item in _follow, on the frames that ship.
-    flags.extend({"key": remaining[0], "text": n} for n in notes if not n.startswith("composition:"))
+    flags.extend(_flag(remaining[0], n["text"], n["detail"]) for n in notes
+                 if not n["text"].startswith("eye line "))
     setup_shift = rect.cx - g["eyes"][0]   # off-centre shift the setup chose (keep-out), kept by pans
 
     items: dict[str, Rect] = {}
@@ -511,7 +600,7 @@ def solve_base(setup_items: list[str], measures: dict, decision: dict, budget: f
             items[k] = own
             flags.append({"key": k, "text": f"outlier: gestures would loosen the setup frame "
                                             f"{ratio:.2f}x; this item has its own looser frame"})
-            flags.extend({"key": k, "text": n} for n in own_notes)
+            flags.extend(_flag(k, n["text"], n["detail"]) for n in own_notes)
         else:  # weak or missing detection
             items[k] = rect
             pct = round(100 * (m or {}).get("detected", 0.0))
@@ -526,8 +615,8 @@ def solve_base(setup_items: list[str], measures: dict, decision: dict, budget: f
     punch_ok = budget_ok and budget * rect.w >= opts.punch_min - EPS
     for k, r in items.items():  # whatever the steps above did, a clutter tangent is never silent
         for box in _slivers(r, keep_out):
-            flags.append({"key": k, "text": f"clutter sliver at frame edge: keep-out {_fmt(box)} "
-                                            f"shows as a thin strip"})
+            flags.append(_flag(k, f"thin strip of clutter at {_edge_words(_edges(r, box))}",
+                               f"clutter sliver at frame edge: keep-out {_fmt(box)} shows as a thin strip"))
     unique = list({(f["key"], f["text"]): f for f in flags}.values())  # setup and item checks overlap
     return {"rect": rect, "items": items, "flags": unique, "punch_ok": punch_ok,
             "outliers": {k for k, _ in outliers}}
@@ -700,9 +789,11 @@ def solve_punches(runs: list[list[str]], item_rects: dict, measures: dict, setup
             out[b] = _trace(out[a], ma, out[b], mb, keep_out, keep_in, opts)
             jump = abs(_eye_x(out[a], ma) - _eye_x(out[b], mb))
             if jump > opts.eye_tol + EPS:
-                flags.append({"key": b, "text": f"eye trace: eyes jump {round(100 * jump)}% of frame "
-                                                f"width across the cut from {a}; a pan to match "
-                                                f"would add clutter, cut set dressing or a gesture"})
+                why = "a pan to match would add clutter, cut set dressing or a gesture"
+                flags.append(_flag(b, f"eyes jump {round(100 * jump)}% of the frame width across the "
+                                      f"cut into this clip; {why}",
+                                   f"eye trace: eyes jump {round(100 * jump)}% of frame width across "
+                                   f"the cut from {a}; {why}"))
     return out, flags
 
 

@@ -87,8 +87,8 @@ class KeepOutTest(Base):
         box = (0.505, 0.20, 0.515, 0.25)  # tiny, wholly inside, over the head: cannot be removed
         res = self.solve({"k": m(eyes=(0.52, 0.30))}, decision(keep_out=[box]))
         texts = [f["text"] for f in res["flags"]]
-        self.assertTrue(any(t.startswith("clutter left in frame") for t in texts), texts)
-        self.assertFalse(any(t.startswith("clutter sliver") for t in texts), texts)
+        self.assertTrue(any(t.startswith("clutter left at the top edge") for t in texts), texts)
+        self.assertFalse(any(t.startswith("thin strip of clutter") for t in texts), texts)
 
     def test_no_silent_keep_out_sliver_at_frame_edge(self):
         # Sweep clutter positions, gestures and budgets: any keep-out showing as a strip thinner
@@ -113,7 +113,7 @@ class KeepOutTest(Base):
                             if strip(r, box):
                                 slivers += 1
                                 self.assertTrue(any(f["key"] == k and f["text"].startswith(
-                                    "clutter sliver at frame edge") for f in res["flags"]),
+                                    "thin strip of clutter at the ") for f in res["flags"]),
                                     (budget, box, ext, r, res["flags"]))
         self.assertGreater(checked, 300)
         self.assertGreater(slivers, 0)  # the sweep does reach the sliver case
@@ -126,8 +126,11 @@ class KeepOutTest(Base):
         self.assertLessEqual(r.left, 0.20 - 1e-6)
         self.assertLessEqual(abs(r.cx - 0.53), OPTS.max_shift * r.w + 1e-6)  # never past the allowance
         texts = [f["text"] for f in res["flags"]]
-        self.assertTrue(any("clutter left in frame" in t for t in texts), texts)
+        self.assertIn("clutter left at the left edge: removing it would cut a gesture or put the "
+                      "speaker off centre; gestures kept", texts)
         self.assertEqual(res["flags"][0]["key"], "k")
+        self.assertIn("(0.00, 0.00, 0.29, 1.00)", res["flags"][0]["detail"])
+        self.assertNotIn("(0.", res["flags"][0]["text"])
 
 
 class KeepInTest(Base):
@@ -200,7 +203,8 @@ class CompositionTest(Base):
         self.assertLessEqual(r.top, 0.10 - OPTS.gesture_margin * r.h + 1e-6)
         frac = (0.40 - r.top) / r.h
         texts = [f["text"] for f in res["flags"]]
-        self.assertEqual(texts, [f"composition: eye line at {round(100 * frac)}% of frame height"])
+        where = "low" if frac > 0.36 else "high"
+        self.assertEqual(texts, [f"eye line {where} ({round(100 * frac)}% of frame height)"])
 
     def test_missing_extent_is_flagged(self):
         meas = m()
@@ -232,7 +236,7 @@ class PanFollowTest(Base):
                 max(0.0, min(box[2], r.right) - max(box[0], r.left))
 
         self.assertLessEqual(shown(it), shown(rect) + 1e-9)
-        self.assertTrue(any(f["key"] == "k3" and f["text"].startswith("composition: eye line at")
+        self.assertTrue(any(f["key"] == "k3" and f["text"].startswith("eye line ")
                             for f in res["flags"]), res["flags"])
 
     def test_tilt_without_hard_range_cuts_no_more_gesture(self):
@@ -261,7 +265,7 @@ class PanFollowTest(Base):
         res = self.solve(meas)
         for k, r in res["items"].items():
             frac = (0.40 - r.top) / r.h
-            flagged = any(f["key"] == k and f["text"].startswith("composition") for f in res["flags"])
+            flagged = any(f["key"] == k and f["text"].startswith("eye line ") for f in res["flags"])
             self.assertEqual(flagged, not 0.25 - 1e-6 <= frac <= 0.36 + 1e-6, (k, frac, res["flags"]))
 
     def test_item_eye_line_off_band_is_tilted_back(self):
@@ -305,15 +309,15 @@ class BudgetTest(Base):
         self.assertGreaterEqual(r.left, 0.1 - 1e-6)
         self.assertGreater(zoom_of(r), 1.0)
         self.assertLessEqual(zoom_of(r), OPTS.declutter_cap + 1e-6)
-        self.assertFalse(any("clutter left in frame" in f["text"] for f in res["flags"]))
+        self.assertFalse(any("clutter left" in f["text"] for f in res["flags"]))
 
     def test_budget_not_gestures_blamed_when_cap_blocks_declutter(self):
         res = self.solve({"k": m(eyes=(0.50, 0.30))}, decision(keep_out=[(0, 0, 0.2, 1)]), budget=1.0)
         self.assertLessEqual(zoom_of(res["rect"]), OPTS.declutter_cap + 1e-6)
-        texts = [f["text"] for f in res["flags"] if "clutter left in frame" in f["text"]]
+        texts = [f["text"] for f in res["flags"] if "clutter left" in f["text"]]
         self.assertEqual(len(texts), 1)
-        self.assertIn("budget", texts[0])
-        self.assertNotIn("cutting gestures", texts[0])
+        self.assertIn("more zoom than the source allows", texts[0])
+        self.assertNotIn("gesture", texts[0])
 
     def test_small_budget_without_clutter_never_softens(self):
         res = self.solve({"k": m()}, budget=1.2)
@@ -393,3 +397,33 @@ class RestingHandsTest(Base):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PlainFlagTextTest(Base):
+    def test_joint_words(self):
+        from solve import _joint_word
+        self.assertEqual(_joint_word("left_elbow"), "elbows")
+        self.assertEqual(_joint_word("right_wrist"), "wrists")
+        self.assertEqual(_joint_word("left_hip"), "waist")
+        self.assertEqual(_joint_word("neck"), "neck")
+
+    def test_joint_flag_names_the_joint(self):
+        # Joints every 0.02 down the frame: no bottom edge clears them, and growing to the full
+        # source would bring the clutter back. The flag names the joint in words.
+        joints = {f"left_elbow{i}": 0.30 + 0.02 * i for i in range(35)}
+        joints["left_elbow"] = 0.99
+        res = self.solve({"k": m(eyes=(0.53, 0.30), joints=joints)}, decision(keep_out=[(0, 0, 0.1, 1)]))
+        jf = [f for f in res["flags"] if f["text"].startswith("bottom edge on the ")]
+        self.assertEqual(len(jf), 1, res["flags"])
+        self.assertNotIn("y=", jf[0]["text"])
+        self.assertIn("y=", jf[0]["detail"])
+
+    def test_edge_names(self):
+        from geometry import Rect
+        from solve import _edges
+        r = Rect(0.5, 0.5, 0.5)
+        self.assertEqual(_edges(r, (0.0, 0.3, 0.26, 0.6)), ["left"])
+        self.assertEqual(_edges(r, (0.7, 0.6, 1.0, 1.0)), ["right", "bottom"])
+        self.assertEqual(_edges(r, (0.30, 0.30, 0.32, 0.32)), ["left"])   # inside: the nearest edge
+        self.assertEqual(_edges(r, (0.0, 0.0, 0.29, 1.0)), ["left"])      # full height: the side only
+        self.assertEqual(_edges(r, (0.0, 0.0, 1.0, 0.27)), ["top"])

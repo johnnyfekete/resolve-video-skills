@@ -202,6 +202,56 @@ class SolveCliTest(unittest.TestCase):
             self.assertRegex(f["where"], r"S0\d_[AB]\.MOV at \d\d:\d\d\.\d\d")
 
 
+class PlainIssueTextTest(unittest.TestCase):
+    """Checklist text is plain words; keys and coordinates stay in REPORT.md."""
+
+    def setUp(self):
+        self._td = tempfile.TemporaryDirectory()
+        self.w = Workdir(Path(self._td.name))
+
+    def tearDown(self):
+        self._td.cleanup()
+
+    def test_flag_text_has_no_keys_or_coordinates_and_report_keeps_the_detail(self):
+        import re
+        self.w.decide()
+        d = json.loads((self.w.root / ".edit" / "framing" / "decisions.json").read_text())
+        d["setups"]["A"]["keep_out"] = [[0.0, 0.0, 0.45, 1.0]]   # over the gestures: cannot go
+        decisions.save(self.w.root / ".edit" / "framing" / "decisions.json", d)
+        code, out = self.w.solve("--push", "3.0")   # an over-budget push: a setup-level reason
+        self.assertEqual(code, 0, out)
+        flags = self.w.solution()["flags"]
+        self.assertTrue(any("clutter left at the left edge" in f["text"] for f in flags), flags)
+        for f in flags:
+            self.assertIsNone(re.search(r"V\d+@\d+", f["text"]), f)
+            self.assertFalse(f["text"].startswith("setup "), f)
+            self.assertNotIn("(0.", f["text"], f)
+            self.assertFalse(f["where"].startswith("setup "), f)
+            self.assertRegex(f["where"], r"S0\d_[AB]\.MOV at \d\d:\d\d\.\d\d")
+        self.assertIn("(0.00, 0.00, 0.45, 1.00)", self.w.report())
+
+    def test_setup_level_flag_where_is_the_first_clip_and_timecode(self):
+        by_key = {"V1@0": {"clip": "S01_A.MOV", "start": 0}, "V1@240": {"clip": "S01_A.MOV", "start": 240}}
+        where = framing._flag_where({"key": None, "setup": "A", "text": "x"}, by_key,
+                                    {"A": ["V1@240", "V1@0"]}, 24.0, [])
+        self.assertEqual(where, "S01_A.MOV at 00:00.00")
+
+    def test_eye_trace_text_names_no_key(self):
+        from solve import solve_punches
+        from geometry import Rect
+        meas = {k: {"detected": 1.0, "eyes": list(e), "face_h": 0.1, "extent": [e[0] - 0.05, 0.2, e[0] + 0.05, 0.5],
+                    "joints_y": {}} for k, e in (("a", (0.3, 0.35)), ("b", (0.7, 0.35)))}
+        rects = {"a": Rect(0.3, 0.45, 0.5), "b": Rect(0.5, 0.45, 0.5)}   # eyes at 50% and 90%
+        info = {"A": {"label": "plain", "punch_ok": False, "rect": None, "outliers": set(),
+                      "keep_out": [(0.75, 0.0, 1.0, 1.0)], "keep_in": []}}   # a pan right adds clutter
+        _, flags = solve_punches([["a", "b"]], rects, meas, {"a": "A", "b": "A"}, info, 2.0,
+                                 framing.Opts(), set())
+        eye = [f for f in flags if "eyes jump" in f["text"]]
+        self.assertTrue(eye, flags)
+        self.assertNotIn("a;", eye[0]["text"])
+        self.assertIn("from a", eye[0]["detail"])
+
+
 class TranscriptTest(unittest.TestCase):
     def test_lines_map_source_time_to_timeline_time(self):
         plan = {"timeline": {"fps": 24.0}}
@@ -400,8 +450,7 @@ class ApplyTest(unittest.TestCase):
         self.assertEqual(applied["/a.mov|240|240"]["props"]["ZoomX"], 1.5)
         self.assertEqual(applied["/a.mov|240|240"]["fusion_comps"], 0)
         self.assertEqual([c[0] for c in s.calls], ["begin", "finish"])
-        self.assertEqual(s.issues[0][0], "framing")
-        self.assertEqual(s.issues[0][2], "S01_A.MOV at 00:00.00")
+        self.assertEqual(s.issues[0], ("framing", "check me", "S01_A.MOV at 00:00.00"))
 
     def test_abandons_on_error(self):
         items = [FakeItem("S01_A.MOV", 86400)]
@@ -588,7 +637,7 @@ class MergeFlagsTest(unittest.TestCase):
     def test_punch_skips_merge_per_setup_and_duplicates_collapse(self):
         g = "punch-in skipped: even 1.10x would cut a gesture"
         j = "punch-in skipped: even 1.10x would put the bottom edge on a joint"
-        sliver = "clutter sliver at frame edge: keep-out (0.87, 0.30, 1.00, 0.76) shows as a thin strip"
+        sliver = "thin strip of clutter at the right edge"
         flags = [
             {"key": "V1@10", "setup": "J", "text": g, "where": "S25_A.MOV at 02:59.67",
              "attempt": {"cx": 0.5, "cy": 0.5, "w": 0.5, "aspect": 1.7778}},
@@ -598,13 +647,13 @@ class MergeFlagsTest(unittest.TestCase):
             {"key": "V1@1", "setup": "B", "text": sliver, "where": "S02_B.MOV at 00:14.00"},
             {"key": "V1@2", "setup": "B", "text": sliver, "where": "S04_B.MOV at 00:29.00"},
             {"key": "V1@3", "setup": "C", "text": sliver, "where": "S08_C.MOV at 00:55.00"},
-            {"key": None, "setup": "D", "text": "other", "where": "setup D: S12.MOV at 01:00.00"},
+            {"key": None, "setup": "D", "text": "other", "where": "S12.MOV at 01:00.00"},
         ]
         out = framing.merge_flags(flags)
         texts = [f["text"] for f in out]
         self.assertEqual(len(out), 5, texts)
         pj = next(f for f in out if f["setup"] == "J")
-        self.assertTrue(pj["text"].startswith("3 punch-ins skipped on setup J: "), pj["text"])
+        self.assertTrue(pj["text"].startswith("3 punch-ins skipped: "), pj["text"])
         self.assertIn("would cut a gesture (2x)", pj["text"])
         self.assertIn("would put the bottom edge on a joint (1x)", pj["text"])
         self.assertIn("03:07.46", pj["text"])
@@ -612,12 +661,12 @@ class MergeFlagsTest(unittest.TestCase):
         self.assertEqual(pj["key"], "V1@10")
         self.assertEqual(pj["attempt"], flags[0]["attempt"])
         pb = next(f for f in out if f["setup"] == "B" and "punch" in f["text"])
-        self.assertTrue(pb["text"].startswith("1 punch-in skipped on setup B: "), pb["text"])
-        sb = [f for f in out if f["setup"] == "B" and "sliver" in f["text"]]
+        self.assertTrue(pb["text"].startswith("1 punch-in skipped: "), pb["text"])
+        sb = [f for f in out if f["setup"] == "B" and "strip" in f["text"]]
         self.assertEqual(len(sb), 1)
         self.assertIn("S04_B.MOV at 00:29.00", sb[0]["text"])
         self.assertEqual(sb[0]["where"], "S02_B.MOV at 00:14.00")
-        self.assertEqual(len([f for f in out if "sliver" in f["text"]]), 2)  # per setup only
+        self.assertEqual(len([f for f in out if "strip" in f["text"]]), 2)  # per setup only
         for f in out:
             self.assertRegex(f["where"], r"\.MOV at \d\d:\d\d\.\d\d")
 
