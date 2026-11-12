@@ -173,9 +173,26 @@ def _fades(item) -> dict:
 NEUTRAL_COMP = "rvs_neutral"  # pass-through comps a skill could not delete (Resolve keeps an item's only comp)
 
 
+_PASS_TOOLS = {"MediaIn", "MediaOut", "AudioDisplay"}  # what Resolve puts in a new, empty comp
+
+
+def _empty_comp(item, name) -> bool:
+    """True for a comp holding only Resolve's default tools (opening a clip on the Fusion page
+    creates one): it changes nothing in the picture. Unknown when the API cannot tell: False."""
+    try:
+        comp = item.GetFusionCompByName(name)
+        tools = comp.GetToolList(False) if comp is not None else None
+        if not isinstance(tools, dict):
+            return False
+        return all(t.GetAttrs("TOOLS_RegID") in _PASS_TOOLS for t in tools.values())
+    except Exception:
+        return False
+
+
 def fusion_comp_count(item) -> int:
-    """Fusion comps on a timeline item that do something: comps named rvs_neutral* are ignored.
-    Falls back to GetFusionCompCount when the name list is not available."""
+    """Fusion comps on a timeline item that do something: comps named rvs_neutral* and empty comps
+    (only Resolve's default MediaIn/MediaOut) are ignored. Falls back to GetFusionCompCount when the
+    name list is not available."""
     try:
         count = int(item.GetFusionCompCount() or 0)
     except Exception:
@@ -188,7 +205,7 @@ def fusion_comp_count(item) -> int:
             raise TypeError(names)
     except Exception:
         return count
-    return sum(1 for n in names if not str(n).startswith(NEUTRAL_COMP))
+    return sum(1 for n in names if not str(n).startswith(NEUTRAL_COMP) and not _empty_comp(item, n))
 
 
 def export_plan(timeline) -> dict:

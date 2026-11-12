@@ -59,6 +59,26 @@ class BridgeFusionTest(unittest.TestCase):
         self.assertNotIn("fusion_comps", a)
         self.assertEqual(b["fusion_comps"], 1)
 
+    def test_empty_comps_are_not_counted(self):
+        class Tool:
+            def __init__(self, reg): self.reg = reg
+            def GetAttrs(self, k): return self.reg
+
+        class Comp:
+            def __init__(self, *regs): self.tools = {f"t{i}": Tool(r) for i, r in enumerate(regs)}
+            def GetToolList(self, selected): return self.tools
+
+        comps = {"Composition 1": Comp("MediaIn", "MediaOut", "AudioDisplay"),
+                 "Composition 2": Comp("MediaIn", "Transform", "MediaOut")}
+        empty, used = FakeItem("a", 0, 48, 1), FakeItem("b", 48, 96, 2)
+        empty.GetFusionCompNameList = lambda: ["Composition 1"]
+        empty.GetFusionCompByName = comps.get
+        used.GetFusionCompNameList = lambda: ["Composition 1", "Composition 2"]
+        used.GetFusionCompByName = comps.get
+        a, b = rvs.export_plan(FakeTimeline([empty, used]))["items"]
+        self.assertNotIn("fusion_comps", a)
+        self.assertEqual(b["fusion_comps"], 1)
+
     def test_name_list_failure_falls_back_to_count(self):
         it = FakeItem("a", 0, 48, 2)
         it.GetFusionCompNameList = lambda: (_ for _ in ()).throw(AttributeError())
