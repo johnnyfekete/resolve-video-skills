@@ -56,6 +56,36 @@ class CentringTest(Base):
         self.assertLessEqual(0.25, OPTS.face_h_max * r.h + 1e-6)
 
 
+class HeadroomTest(Base):
+    def test_item_with_head_near_the_top_tilts_for_headroom_at_same_zoom(self):
+        # One item sits higher than the rest of its setup: its eye line is still in the band, but
+        # its head nearly touches the frame top. It tilts to keep HEADROOM, at the setup's zoom.
+        import solve
+        meas = {f"k{i}": m(eyes=(0.52, 0.30), face_h=0.16) for i in range(3)}
+        meas["k3"] = m(eyes=(0.52, 0.25), face_h=0.16)
+        res = self.solve(meas)
+        old = solve.HEADROOM
+        solve.HEADROOM = 0.0
+        try:
+            before = self.solve(meas)["items"]["k3"]
+        finally:
+            solve.HEADROOM = old
+        r = res["items"]["k3"]
+
+        def gap(x):
+            return (0.25 - 0.85 * 0.16 - x.top) / x.h
+
+        self.assertLess(gap(before), 0.05)
+        self.assertEqual(r.w, before.w)
+        self.assertGreaterEqual(gap(r), 0.10 - 1e-6, r)
+        self.assertTrue(0.25 - 1e-6 <= (0.25 - r.top) / r.h <= 1 / 3 + 1e-6, r)
+        self.assertEqual(res["flags"], [])
+
+    def test_small_face_keeps_the_upper_third(self):
+        r = self.solve({"k": m(eyes=(0.52, 0.30), face_h=0.08)})["rect"]
+        self.assertAlmostEqual(0.30, r.top + r.h / 3, delta=0.01)
+
+
 class GestureTest(Base):
     def test_hand_low_in_frame_is_inside_with_margin(self):
         res = self.solve({"k": m(eyes=(0.52, 0.30), extent=(0.35, 0.17, 0.70, 0.95))})

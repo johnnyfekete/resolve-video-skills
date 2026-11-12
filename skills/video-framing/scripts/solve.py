@@ -21,6 +21,8 @@ EYE_HIGH = 0.25        # the eye line may sit between this and 1/3 of the frame 
 N_SAMPLES = 9          # positions tried per axis when a frame must move (keep-out, keep-in, joints)
 EYE_BAND = (0.25, 0.36)  # an eye line outside this band (fraction of frame height) is flagged
 SLIVER = 0.03          # keep-out visible as a strip thinner than this (of the frame) is a tangent
+HEADROOM = 0.10        # space kept between the top of the head and the frame top (of frame height)
+HEAD_TOP = 0.85        # the top of the head (hair included) sits this many face heights above the eyes
 
 
 @dataclass(frozen=True)
@@ -50,6 +52,13 @@ def _h(w: float, opts: Opts) -> float:
 
 def _w_max(opts: Opts) -> float:
     return min(1.0, OUT_ASPECT / opts.aspect)
+
+
+def _eye_high(g: dict, h: float) -> float:
+    """Highest allowed eye line (fraction of frame height from the top): EYE_HIGH, or lower when
+    the head needs HEADROOM above it."""
+    fh = g.get("face_h")
+    return max(EYE_HIGH, HEAD_TOP * fh / h + HEADROOM) if fh else EYE_HIGH
 
 
 def _clamp(v: float, lo: float, hi: float) -> float:
@@ -97,7 +106,8 @@ def _ranges(g: dict, w: float, opts: Opts):
 
     Hard: the gesture extent grown by the margin stays inside, and the rect stays inside the source.
     Soft: the centre is within the off-centre allowance of the eyes, and the eye line sits between
-    EYE_HIGH and 1/3 of the frame height from the top.
+    EYE_HIGH and 1/3 of the frame height from the top, and lower when that leaves the head its
+    HEADROOM at this width (when it cannot, the eye line alone decides).
     """
     h = _h(w, opts)
     my = opts.gesture_margin * h
@@ -113,7 +123,11 @@ def _ranges(g: dict, w: float, opts: Opts):
     ex, ey = g["eyes"]
     s = opts.max_shift * w
     sx = rng(max(hx[0], ex - s), min(hx[1], ex + s)) if hx else None
-    sy = rng(max(hy[0], ey + h / 6), min(hy[1], ey + h * (0.5 - EYE_HIGH))) if hy else None
+    sy = None
+    if hy:  # headroom tilts the frame where the range allows it; it never makes a frame looser
+        lo = max(hy[0], ey + h / 6)
+        sy = (rng(lo, min(hy[1], ey + h * (0.5 - _eye_high(g, h))))
+              or rng(lo, min(hy[1], ey + h * (0.5 - EYE_HIGH))))
     return hx, hy, sx, sy
 
 
@@ -226,8 +240,8 @@ def _face_w(g: dict, opts: Opts) -> float:
     return g["face_h"] / opts.face_h_max * OUT_ASPECT / opts.aspect if g["face_h"] else 0.0
 
 
-def _in_band(frac: float) -> bool:
-    return EYE_BAND[0] - EPS <= frac <= EYE_BAND[1] + EPS
+def _in_band(frac: float, high: float = EYE_BAND[0]) -> bool:
+    return max(EYE_BAND[0], high) - EPS <= frac <= EYE_BAND[1] + EPS
 
 
 def _gesture_cut(r: Rect, ext: Box) -> float:
@@ -508,8 +522,9 @@ def _follow(k: str, gi: dict, g: dict, rect: Rect, shift: float, keep_out, keep_
                                             "frame pans to follow the speaker"})
 
     # Eye line: tilt back toward the band, but declutter, keep-in, joints and gestures come first.
-    if not _in_band(_eye_frac(gi, r)):
-        want = _clamp(_eye_frac(gi, r), EYE_HIGH, 1 / 3)
+    high = _eye_high(gi, r.h)
+    if not _in_band(_eye_frac(gi, r), high):
+        want = _clamp(_eye_frac(gi, r), min(high, 1 / 3), 1 / 3)
         lo, hi = hy_hard or (r.h / 2, 1 - r.h / 2)
         target = _clamp(ey + r.h / 2 - want * r.h, lo, hi)
         base = (_clutter(r, keep_out), _cuts(r, keep_in), _on_joint(r, gi["joints"], opts),

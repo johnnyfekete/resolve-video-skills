@@ -85,7 +85,7 @@ Boxes are `[left, top, right, bottom]`, normalised 0..1 on the setup still (read
 These are what the scripts enforce. The reasons are here so you can judge shots the rules do not cover.
 
 **Base frame, one per setup**
-- Eyes on or just above the upper third line, a small and equal headroom for every clip. *Eyes near the upper third read as natural and engaged; too much wall above looks amateur. A frame that cuts the forehead or touches the hair looks like a mistake.*
+- Eyes on or just above the upper third line, a small and equal headroom for every clip. *Eyes near the upper third read as natural and engaged; too much wall above looks amateur. A frame that cuts the forehead or touches the hair looks like a mistake.* When hands low in the frame pull the frame down and push the eyes above the third, the frame tilts back to keep about 10% of the frame height above the head (estimated from the face size), at the same zoom; where gestures, clutter or a joint leave no room, the eye line alone decides.
 - Centred on the face for direct address, shifting off centre by at most 5% of the width to keep clutter out. *Looking straight into the lens implies symmetry; off-centre faces read as a mistake unless the shot is clearly composed that way.*
 - The bottom edge never sits on a joint (chin, neck, elbows, wrists, waist, knees). *A frame that ends at a joint looks amputated; between joints it looks intended.*
 - No tangents. *An object whose edge runs along the frame edge pulls the eye. Include it clearly or crop it clearly: a laptop cut by the edge is fine, a sofa arm showing as a sliver is not.* Check this on the previews, the solver cannot see it.
