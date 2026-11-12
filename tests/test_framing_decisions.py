@@ -1,0 +1,245 @@
+import contextlib
+import io
+import os
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "skills" / "video-framing" / "scripts"))
+
+import decisions  # noqa: E402
+from decisions import hand_framed, load, load_applied, match_key, merge, save_applied, template  # noqa: E402
+import json  # noqa: E402
+
+
+def item(start=0, end=100, props=None, comps=0, src=10, path="/a.mov"):
+    d = {"track": 1, "start": start, "end": end, "path": path, "src_start": src, "media": "both"}
+    if props:
+        d["props"] = props
+    if comps:
+        d["fusion_comps"] = comps
+    return d
+
+
+class LoadTest(unittest.TestCase):
+    def _load(self, setup, push=None):
+        d = template({"A": ["V1@0"]})
+        d["setups"]["A"].update(setup)
+        if push:
+            d["push_ins"] = push
+        with tempfile.TemporaryDirectory() as t:
+            p = Path(t) / "decisions.json"
+            p.write_text(json.dumps(d))
+            return load(p)
+
+    def test_valid(self):
+        self.assertEqual(self._load({"label": "plain", "keep_out": [[0.1, 0.1, 0.3, 0.3]]})["setups"]["A"]["label"], "plain")
+
+    def test_box_out_of_range(self):
+        with self.assertRaisesRegex(ValueError, "setup A keep_out"):
+            self._load({"label": "plain", "keep_out": [[0.2, 0.1, 1.3, 0.9]]})
+
+    def test_bad_label(self):
+        with self.assertRaisesRegex(ValueError, "setup A.*boring"):
+            self._load({"label": "boring"})
+
+    def test_missing_label(self):
+        with self.assertRaisesRegex(ValueError, "setup A.*label"):
+            self._load({})
+
+    def test_push_end_before_start(self):
+        with self.assertRaisesRegex(ValueError, "push_ins"):
+            self._load({"label": "plain"}, [{"start_s": 5, "end_s": 5, "text": "x", "reason": "y"}])
+
+
+class MergeTest(unittest.TestCase):
+    def test_keeps_unchanged_and_adds_new(self):
+        old = template({"A": ["V1@0", "V1@100"]})
+        old["setups"]["A"].update(label="dynamic", keep_out=[[0, 0, 0.2, 0.2]])
+        old["push_ins"] = [{"start_s": 1, "end_s": 2, "text": "t", "reason": "r"}]
+        new = merge(old, {"A": ["V1@100", "V1@0"], "B": ["V1@200"]})
+        self.assertEqual(new["setups"]["A"]["keep_out"], [[0, 0, 0.2, 0.2]])
+        self.assertEqual(new["setups"]["A"]["label"], "dynamic")
+        self.assertIsNone(new["setups"]["B"]["label"])
+        self.assertEqual(len(new["push_ins"]), 1)
+
+    def test_changed_item_set_is_redecided(self):
+        old = template({"A": ["V1@0"]})
+        old["setups"]["A"].update(label="plain")
+        self.assertIsNone(merge(old, {"A": ["V1@0", "V1@9"]})["setups"]["A"]["label"])
+
+
+class HandFramedTest(unittest.TestCase):
+    def test_first_run(self):
+        self.assertEqual(hand_framed([item(props={"ZoomX": 1.3})], None), {"V1@0"})
+        self.assertEqual(hand_framed([item()], None), set())
+        self.assertEqual(hand_framed([item(comps=1)], None), {"V1@0"})
+
+    def test_rerun_matches_applied(self):
+        it = item(props={"ZoomX": 1.15, "ZoomY": 1.15})
+        applied = {match_key(it): {"props": {"ZoomX": 1.15, "ZoomY": 1.15}, "fusion_comps": 0}}
+        self.assertEqual(hand_framed([it], applied), set())
+        # Resolve round-trip noise is tolerated
+        noisy = item(props={"ZoomX": 1.150001, "ZoomY": 1.15})
+        self.assertEqual(hand_framed([noisy], applied), set())
+
+    def test_rerun_differs(self):
+        it = item(props={"ZoomX": 1.3, "ZoomY": 1.3})
+        applied = {match_key(it): {"props": {"ZoomX": 1.15, "ZoomY": 1.15}, "fusion_comps": 0}}
+        self.assertEqual(hand_framed([it], applied), {"V1@0"})
+
+    def test_rerun_new_comp_is_hand(self):
+        it = item(comps=1)
+        applied = {match_key(it): {"props": {}, "fusion_comps": 0}}
+        self.assertEqual(hand_framed([it], applied), {"V1@0"})
+
+    def test_rerun_own_push_in_comp_is_not_hand(self):
+        # framing's own push-in from the last run: one comp in the plan, one recorded, same props.
+        z = {"ZoomX": 1.4, "ZoomY": 1.4, "Pan": 12.0, "Tilt": -3.0}
+        it = item(props=dict(z), comps=1)
+        applied = {match_key(it): {"props": dict(z), "fusion_comps": 1}}
+        self.assertEqual(hand_framed([it], applied), set())
+        # a second comp (the user's) on top of it is a hand edit
+        self.assertEqual(hand_framed([item(props=dict(z), comps=2)], applied), {"V1@0"})
+
+    def test_keyframed_item_is_always_left_alone(self):
+        # even with the props framing recorded: setting a property would delete the keyframes
+        z = {"ZoomX": 1.4, "ZoomY": 1.4, "Pan": 12.0, "Tilt": -3.0}
+        it = item(props=dict(z))
+        it["keyframes"] = {"transform.scale": [[0, "1.400 1.400", ""], [100, "1.480 1.480", ""]]}
+        applied = {match_key(it): {"props": dict(z), "fusion_comps": 0}}
+        self.assertEqual(hand_framed([it], applied), {"V1@0"})
+
+    def test_rippled_item_still_matched(self):
+        applied = {match_key(item(start=0, end=100)): {"props": {"ZoomX": 1.15, "ZoomY": 1.15}, "fusion_comps": 0}}
+        moved = item(start=500, end=600, props={"ZoomX": 1.15, "ZoomY": 1.15})
+        self.assertEqual(hand_framed([moved], applied), set())
+
+    def test_new_item_on_later_run_uses_first_run_rule(self):
+        applied = {"other|1|1": {"props": {}, "fusion_comps": 0}}
+        self.assertEqual(hand_framed([item(props={"Pan": 20.0})], applied), {"V1@0"})
+        self.assertEqual(hand_framed([item()], applied), set())
+
+    def test_rerun_after_user_tweak_does_not_stack(self):
+        """Re-run: framing-owned clip is re-solved, the tweaked clip is left untouched."""
+        a, b = item(start=0, end=100, src=0), item(start=100, end=200, src=100)
+        z = {"ZoomX": 1.15, "ZoomY": 1.15}
+        applied = {match_key(a): {"props": z, "fusion_comps": 0}, match_key(b): {"props": z, "fusion_comps": 0}}
+        a["props"] = dict(z)
+        b["props"] = {"ZoomX": 1.4, "ZoomY": 1.4}  # user tweak
+        self.assertEqual(hand_framed([a, b], applied), {"V1@100"})
+
+
+class AppliedIoTest(unittest.TestCase):
+    def test_roundtrip_atomic(self):
+        with tempfile.TemporaryDirectory() as t:
+            p = Path(t) / "framing" / "applied.json"
+            self.assertIsNone(load_applied(p))
+            save_applied(p, {"k": {"props": {"ZoomX": 1.1}, "fusion_comps": 0}})
+            self.assertEqual(load_applied(p)["k"]["props"]["ZoomX"], 1.1)
+            self.assertEqual([f.name for f in p.parent.iterdir()], ["applied.json"])
+
+
+class BrollSetupAndIssuesTest(unittest.TestCase):
+    def test_setup_with_every_item_reclassified_needs_no_label(self):
+        d = template({"A": ["V1@0", "V1@10"]})
+        d["reclassify"] = {"V1@0": "broll", "V1@10": "broll"}
+        self.assertIsNone(decisions.validate(d)["setups"]["A"]["label"])
+
+    def test_setup_with_one_item_left_still_needs_a_label(self):
+        d = template({"A": ["V1@0", "V1@10"]})
+        d["reclassify"] = {"V1@0": "broll"}
+        with self.assertRaisesRegex(ValueError, "setup A.*label"):
+            decisions.validate(d)
+
+    def test_issues_are_validated(self):
+        d = template({})
+        d["issues"] = [{"text": "Lamp or plant?", "where": "S03_IMG_1.MOV at 01:03.00"}]
+        self.assertEqual(decisions.validate(d)["issues"], d["issues"])
+        for bad in ([{"text": "", "where": "x"}], [{"text": "x"}], [{"text": "x", "where": 3}], ["x"], {}):
+            d["issues"] = bad
+            with self.assertRaisesRegex(ValueError, "issues"):
+                decisions.validate(d)
+
+    def test_bottom_hands_is_absent_or_gesture(self):
+        d = template({"A": ["V1@0"]})
+        d["setups"]["A"].update(label="dynamic", bottom_hands="gesture")
+        self.assertEqual(decisions.validate(d)["setups"]["A"]["bottom_hands"], "gesture")
+        for bad in ("resting", "", None, True):
+            d["setups"]["A"]["bottom_hands"] = bad
+            with self.assertRaisesRegex(ValueError, "setup A.*bottom_hands"):
+                decisions.validate(d)
+
+    def test_merge_keeps_issues(self):
+        old = template({"A": ["V1@0"]})
+        old["issues"] = [{"text": "t", "where": "w"}]
+        self.assertEqual(merge(old, {"A": ["V1@0"]})["issues"], old["issues"])
+
+
+class PushStillMatchesTest(unittest.TestCase):
+    WORDS = [(10.0, 10.4, "Writing"), (10.5, 10.7, "is"), (10.8, 11.5, "thinking."),
+             (12.0, 12.3, "That's"), (12.4, 12.8, "the"), (12.9, 13.5, "point!")]
+
+    def test_same_words_with_other_case_and_punctuation_match(self):
+        self.assertTrue(decisions.push_still_matches("writing is THINKING, that's the point",
+                                                     self.WORDS, 10.0, 13.5))
+
+    def test_other_words_do_not_match(self):
+        self.assertFalse(decisions.push_still_matches("Nobody reads the second paragraph.",
+                                                      self.WORDS, 10.0, 13.5))
+
+    def test_sixty_percent_of_the_words_in_any_order_match(self):
+        # 3 of 5 words found (order ignored): enough. 2 of 5: not.
+        self.assertTrue(decisions.push_still_matches("thinking writing is quite hard", self.WORDS, 10.0, 13.5))
+        self.assertFalse(decisions.push_still_matches("thinking writing was quite hard", self.WORDS, 10.0, 13.5))
+
+    def test_words_half_a_second_outside_the_range_count(self):
+        self.assertTrue(decisions.push_still_matches("Writing is thinking.", self.WORDS, 10.45, 11.0))
+        self.assertFalse(decisions.push_still_matches("That's the point!", self.WORDS, 10.0, 11.3))
+
+    def test_repeated_words_need_repeats(self):
+        words = [(0.0, 0.5, "very"), (0.6, 1.0, "good")]
+        self.assertFalse(decisions.push_still_matches("very very very good", words, 0.0, 1.0))
+
+
+class PendingAppliedTest(unittest.TestCase):
+    def setUp(self):
+        self._td = tempfile.TemporaryDirectory()
+        self.path = Path(self._td.name) / "applied.json"
+        self.pending = self.path.with_name("applied.json.pending")
+
+    def tearDown(self):
+        self._td.cleanup()
+
+    def _load(self):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            return decisions.load_applied(self.path), err.getvalue()
+
+    def test_newer_pending_record_is_promoted_with_a_warning(self):
+        self.path.write_text(json.dumps({"old": {}}))
+        self.pending.write_text(json.dumps({"new": {}}))
+        os.utime(self.path, (1000, 1000))
+        data, err = self._load()
+        self.assertEqual(data, {"new": {}})
+        self.assertFalse(self.pending.exists())
+        self.assertIn("pending", err)
+
+    def test_pending_record_without_applied_is_promoted(self):
+        self.pending.write_text(json.dumps({"new": {}}))
+        data, err = self._load()
+        self.assertEqual(data, {"new": {}})
+        self.assertTrue(self.path.exists())
+
+    def test_older_pending_record_is_ignored(self):
+        self.pending.write_text(json.dumps({"stale": {}}))
+        self.path.write_text(json.dumps({"current": {}}))
+        os.utime(self.pending, (1000, 1000))
+        data, _ = self._load()
+        self.assertEqual(data, {"current": {}})
+
+
+if __name__ == "__main__":
+    unittest.main()

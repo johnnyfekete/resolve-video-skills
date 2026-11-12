@@ -30,6 +30,7 @@ import math
 import os
 import re
 import sys
+from fractions import Fraction
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -111,6 +112,8 @@ def connect():
     project = resolve.GetProjectManager().GetCurrentProject()
     if project is None:
         raise RvsError("No project is open in Resolve.")
+    global _RESOLVE
+    _RESOLVE = resolve
     return resolve, project
 
 
@@ -170,9 +173,145 @@ def _fades(item) -> dict:
     return {k: f[k] for k in ("FadeIn", "FadeOut") if f.get(k)}
 
 
-def export_plan(timeline) -> dict:
-    """Read a Resolve timeline into a plan dict. Linked video+audio pairs become one item."""
+NEUTRAL_COMP = "rvs_neutral"  # pass-through comps a skill could not delete (Resolve keeps an item's only comp)
+
+
+_PASS_TOOLS = {"MediaIn", "MediaOut", "AudioDisplay"}  # what Resolve puts in a new, empty comp
+
+
+def _empty_comp(item, name) -> bool:
+    """True for a comp holding only Resolve's default tools (opening a clip on the Fusion page
+    creates one): it changes nothing in the picture. Unknown when the API cannot tell: False."""
+    try:
+        comp = item.GetFusionCompByName(name)
+        tools = comp.GetToolList(False) if comp is not None else None
+        if not isinstance(tools, dict):
+            return False
+        return all(t.GetAttrs("TOOLS_RegID") in _PASS_TOOLS for t in tools.values())
+    except Exception:
+        return False
+
+
+def fusion_comp_count(item) -> int:
+    """Fusion comps on a timeline item that do something: comps named rvs_neutral* and empty comps
+    (only Resolve's default MediaIn/MediaOut) are ignored. Falls back to GetFusionCompCount when the
+    name list is not available."""
+    try:
+        count = int(item.GetFusionCompCount() or 0)
+    except Exception:
+        return 0
+    if count == 0:
+        return 0
+    try:
+        names = item.GetFusionCompNameList()
+        if not isinstance(names, (list, tuple)):
+            raise TypeError(names)
+    except Exception:
+        return count
+    return sum(1 for n in names if not str(n).startswith(NEUTRAL_COMP) and not _empty_comp(item, n))
+
+
+_RESOLVE = None   # the last connect()ed Resolve; export_plan reads keyframes through it
+_CLIP_TAGS = {"clip", "asset-clip", "ref-clip", "sync-clip", "mc-clip", "video"}
+
+
+def _secs(t: str | None) -> Fraction:
+    """An FCPXML time ('1001/24s', '3600s') in seconds."""
+    if not t:
+        return Fraction(0)
+    t = t.rstrip("s")
+    return Fraction(t) if t else Fraction(0)
+
+
+def _kf_value(v: str) -> str:
+    out = []
+    for x in (v or "").split():
+        try:
+            out.append(f"{float(x):.3f}")
+        except ValueError:
+            out.append(x)
+    return " ".join(out)
+
+
+def parse_fcpxml_keyframes(text: str, fps: float, start_frame: int) -> dict:
+    """Keyframed Inspector parameters per video item, from an FCPXML export of a timeline.
+
+    Returns {(track, start): {"transform.scale": [[frame, value, interp], ...], ...}} where start is
+    the item's timeline start relative to `start_frame` (as in plans) and frame counts timeline
+    frames from the item's first frame. V1 is the spine; a connected clip on lane n is V(n+1).
+    The Scripting API cannot read keyframes at all; this is the only way to see them.
+    """
+    import xml.etree.ElementTree as ET
+    root = ET.fromstring(text)
+    spine = root.find(".//sequence/spine")
+    out: dict = {}
+    if spine is None:
+        return out
+
+    def handle(el, track: int, abs_start: Fraction) -> None:
+        params = {}
+        for adj in el:
+            if not adj.tag.startswith("adjust-"):
+                continue
+            for p in adj.iter("param"):
+                anim = p.find("keyframeAnimation")
+                if anim is None:
+                    continue
+                keys = []
+                for k in anim.findall("keyframe"):
+                    # Resolve stores a keyframe up to a frame early (on the source frame grid): the
+                    # timeline frame it was set on is the next whole frame.
+                    frame = math.ceil(float((_secs(k.get("time")) - _secs(el.get("start"))) * Fraction(fps)) - 1e-6)
+                    keys.append([frame, _kf_value(k.get("value")), k.get("interp") or k.get("curve") or ""])
+                if keys:
+                    params[f"{adj.tag[len('adjust-'):]}.{p.get('name')}"] = keys
+        if params:
+            out[(track, round(float(abs_start * Fraction(fps))) - start_frame)] = params
+
+    for el in spine:
+        if el.tag in _CLIP_TAGS:
+            handle(el, 1, _secs(el.get("offset")))
+        base = _secs(el.get("offset")) - _secs(el.get("start"))
+        for ch in el:
+            lane = ch.get("lane")
+            if ch.tag in _CLIP_TAGS and lane and int(lane) > 0:
+                handle(ch, int(lane) + 1, base + _secs(ch.get("offset")))
+    return out
+
+
+def timeline_keyframes(timeline, resolve) -> dict | None:
+    """parse_fcpxml_keyframes for a live timeline (exports it to a temporary FCPXML). None when the
+    export is not available: callers then cannot see keyframes and say so."""
+    import tempfile
+    kind = next((getattr(resolve, n) for n in ("EXPORT_FCPXML_1_10", "EXPORT_FCPXML_1_9", "EXPORT_FCPXML_1_8")
+                 if getattr(resolve, n, None) is not None), None)
+    if kind is None:
+        return None
+    with tempfile.TemporaryDirectory() as d:
+        path = Path(d) / "timeline.fcpxml"
+        try:
+            ok = timeline.Export(str(path), kind, getattr(resolve, "EXPORT_NONE", 0))
+        except Exception:
+            ok = False
+        if not ok:
+            return None
+        doc = path / "Info.fcpxml" if path.is_dir() else path   # 1.10 exports a bundle
+        if not doc.exists():
+            return None
+        fps = float(timeline.GetSetting("timelineFrameRate") or 24)
+        return parse_fcpxml_keyframes(doc.read_text(), fps, timeline.GetStartFrame())
+
+
+def export_plan(timeline, resolve=None) -> dict:
+    """Read a Resolve timeline into a plan dict. Linked video+audio pairs become one item.
+    Keyframed Inspector parameters go into an item's "keyframes" (read through an FCPXML export
+    when a Resolve connection is known)."""
     t0 = timeline.GetStartFrame()
+    resolve = resolve or _RESOLVE
+    keyframes = timeline_keyframes(timeline, resolve) if resolve is not None else None
+    if resolve is not None and keyframes is None:
+        print("warning: could not export the timeline as FCPXML; keyframes are not tracked this time.",
+              file=sys.stderr)
     plan = {
         "schema": PLAN_SCHEMA,
         "timeline": {
@@ -206,6 +345,9 @@ def export_plan(timeline) -> dict:
         }
         if not it.GetClipEnabled():
             d["enabled"] = False
+        comps = fusion_comp_count(it)
+        if comps > 0:
+            d["fusion_comps"] = comps
         return d, mpi
 
     def audio_mapping(it):
@@ -227,6 +369,8 @@ def export_plan(timeline) -> dict:
                 d["props"] = p
             if f := _fades(it):
                 d["fades"] = f
+            if keyframes and (kf := keyframes.get((t, d["start"]))):
+                d["keyframes"] = kf
             for li in it.GetLinkedItems() or []:
                 uid = li.GetUniqueId()
                 if uid in audio_by_uid and uid not in audio_seen:
@@ -270,7 +414,8 @@ def export_plan(timeline) -> dict:
 # src_end is left out on purpose: with high-fps sources Resolve rounds it by up to one source frame
 # (under half a timeline frame). Source start + timeline length pin the edit exactly.
 _CMP_KEYS = ("media", "track", "audio_track", "path", "clip", "start", "end", "src_start",
-             "enabled", "props", "audio_props", "fades", "audio_fades", "audio_mapping")
+             "enabled", "props", "audio_props", "fades", "audio_fades", "audio_mapping",
+             "fusion_comps", "keyframes")
 
 
 def _norm(d: dict) -> tuple:
@@ -299,10 +444,20 @@ def _where(d: dict) -> str:
     return f"{d['clip']} {tr} @{d['start']}-{d['end']}"
 
 
+def _kf_text(kf: dict | None) -> str:
+    if not kf:
+        return "none"
+    return ", ".join(f"{k} x{len(v)}" for k, v in sorted(kf.items()))
+
+
 def _field_changes(a: dict, b: dict) -> str:
     out = []
     for k in _CMP_KEYS:
         va, vb = a.get(k), b.get(k)
+        if k == "keyframes":
+            if (va or None) != (vb or None):
+                out.append(f"keyframes {_kf_text(va)} -> {_kf_text(vb)}")
+            continue
         if isinstance(va, dict) or isinstance(vb, dict):
             va, vb = va or {}, vb or {}
             for kk in sorted(set(va) | set(vb)):
@@ -410,10 +565,13 @@ class Session:
         return self.checklist_path
 
     def add_issue(self, step: str, text: str, where: str | None = None) -> dict | None:
-        """Record something a person must check or fix. Duplicates (same step + text) are ignored."""
+        """Record something a person must check or fix. Returns the new issue, or None when an OPEN
+        issue with the same step, text and where (None == None) already exists. The same text on a
+        different clip is a separate issue, and a resolved issue can be raised again."""
         self._require_state()
         issues = self.state.setdefault("issues", [])
-        if any(i["step"] == step and i["text"] == text for i in issues):
+        if any(i["status"] == "open" and i["step"] == step and i["text"] == text and i.get("where") == (where or None)
+               for i in issues):
             return None
         issue = {"id": f"I{len(issues) + 1}", "step": step, "text": text, "status": "open", "created": _now()}
         if where:
@@ -621,7 +779,7 @@ class Session:
         self._save_state()
         return p
 
-    def build(self, plan: dict, step: str, summary: str) -> dict:
+    def build(self, plan: dict, step: str, summary: str, allow_fusion_loss: bool = False) -> dict:
         """Rebuild: create a new timeline from a plan (structural steps). Refuses on unrecorded hand edits."""
         self._require_state()
         if self.state.get("pending"):
@@ -632,6 +790,12 @@ class Session:
                            "\n  ".join(changes[:20]) +
                            "\nRun: rvs.py sync   then make the new plan from the synced plan, so those edits are kept.")
         src_plan = self.load_plan()
+        fusion = [d for d in src_plan.get("items", []) if d.get("fusion_comps") or d.get("keyframes")]
+        if fusion and not allow_fusion_loss:
+            raise RvsError("A build would drop Fusion comps or Inspector keyframes (push-ins, effects) on:\n  " +
+                           "\n  ".join(f"{_where(d)} ({d.get('fusion_comps') or 0} comp(s), keyframes: "
+                                        f"{_kf_text(d.get('keyframes'))})" for d in fusion[:20]) +
+                           "\nUse a fork instead, or pass --allow-fusion-loss to rebuild without them.")
         if src_plan.get("unsupported"):
             print(f"warning: {len(src_plan['unsupported'])} non-media items (titles, generators...) on the current "
                   "timeline are not rebuilt. They stay on the archived version.", file=sys.stderr)
@@ -844,6 +1008,8 @@ def main(argv=None):
     bl.add_argument("plan")
     bl.add_argument("--step", required=True)
     bl.add_argument("--summary", required=True)
+    bl.add_argument("--allow-fusion-loss", action="store_true",
+                    help="build even though Fusion comps on the current timeline will be dropped")
     args = ap.parse_args(argv)
 
     try:
@@ -906,7 +1072,7 @@ def main(argv=None):
             print(f"{args.step} is back in the pipeline")
         elif args.cmd == "build":
             plan = json.loads(Path(args.plan).read_text())
-            entry = s.build(plan, args.step, args.summary)
+            entry = s.build(plan, args.step, args.summary, allow_fusion_loss=args.allow_fusion_loss)
             print(f"v{entry['version']:02d} saved: {entry['timeline']}")
     except RvsError as e:
         print(f"error: {e}", file=sys.stderr)

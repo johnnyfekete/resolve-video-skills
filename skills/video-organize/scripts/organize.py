@@ -230,7 +230,8 @@ def _sync_issues(workdir: Path, data: dict, mode: str, broll_data: dict) -> None
     ours = set(data.get("issue_ids", []))
     for text, where in wanted:
         issue = s.add_issue(STEP, text, where) or next(
-            i for i in s.state["issues"] if i["step"] == STEP and i["text"] == text)
+            i for i in s.state["issues"] if i["status"] == "open" and i["step"] == STEP
+            and i["text"] == text and i.get("where") == (where or None))
         ours.add(issue["id"])
     texts = {text for text, _ in wanted}
     for i in list(s.state["issues"]):
