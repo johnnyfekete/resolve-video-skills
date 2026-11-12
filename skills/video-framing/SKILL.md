@@ -7,7 +7,7 @@ description: Frames a talking-head cut in DaVinci Resolve Studio like a professi
 
 Run this after `video-tighten` (it hides the jump cuts tighten creates) and before `video-color`. Requires the **resolve-bridge** skill installed next to this one (it finds it at `../resolve-bridge`, or set `RVS_BRIDGE`), plus `ffmpeg`, `ffprobe` and `swift` (macOS ships it; Apple Vision measures faces and hands). The transcript needs `uv` (local Whisper) or a transcriber command in `RVS_TRANSCRIBE_CMD`; if transcription fails, `prepare` continues with a warning and the transcript is incomplete.
 
-Run scripts as `python3 <this skill's folder>/scripts/framing.py <command> --workdir <folder>`. Commands: `prepare`, `solve`, `apply`.
+Run scripts as `python3 <this skill's folder>/scripts/framing.py <command> --workdir <folder>`. Commands: `prepare`, `solve`, `apply`, `pushes`.
 
 The scripts measure and do the maths. **You make the judgement calls** (what is clutter, which setups are plain, which lines get a push-in). **Never stop to ask for approval.** The user reviews afterwards. A call you are unsure about still gets your best answer and the build continues; add it to the `issues` list in `decisions.json` (see *How to decide*), and `apply` turns it into a checklist issue. The `reason` fields only go into the report.
 
@@ -39,7 +39,21 @@ The scripts measure and do the maths. **You make the judgement calls** (what is 
    ```bash
    python3 scripts/framing.py apply --workdir <folder>
    ```
-   Solves again, then forks `<base>_vNN_framing` through resolve-bridge (grades, effects and hand edits stay), sets Zoom, Pan and Tilt, adds the push-ins, archives the previous version and saves the project. After the step is recorded, every flag and every entry of your `issues` list becomes an issue in `EDIT_CHECKLIST.md`, located by clip name and timecode. Flags are merged first: all skipped punch-ins of a setup become one issue with their reasons counted, and identical flags on one setup become one. Tell the user the new timeline name, the issue ids and where the report is. Exit code 2 means an expected failure with a message (no timeline tracked, a scaling mode framing is not calibrated for, and so on).
+   Solves again, then forks `<base>_vNN_framing` through resolve-bridge (grades, effects and hand edits stay), sets Zoom, Pan and Tilt (a push-in clip gets its start frame), archives the previous version and saves the project. After the step is recorded, every flag and every entry of your `issues` list becomes an issue in `EDIT_CHECKLIST.md`, located by clip name and timecode. Flags are merged first: all skipped punch-ins of a setup become one issue with their reasons counted, and identical flags on one setup become one. Tell the user the new timeline name, the issue ids and where the report is. Exit code 2 means an expected failure with a message (no timeline tracked, a scaling mode framing is not calibrated for, and so on).
+7. **Keyframe the push-ins in the Inspector.** Resolve's Scripting API cannot create keyframes, so `apply` leaves each push-in clip on its start frame, writes `.edit/framing/keyframes_todo.json` and adds one checklist issue per push-in with the exact values. If you have computer use, do them now; otherwise tell the user the issues are theirs (about a minute per clip), and they are checked off by `pushes check` after the user's next hand-edit sync.
+   ```bash
+   python3 scripts/framing.py pushes begin --workdir <folder>     # forks <base>_vNN_pushins, lists the push-ins
+   python3 scripts/framing.py pushes goto 1 start --workdir <folder>
+   python3 scripts/framing.py pushes finish --workdir <folder>    # checks the keyframes, saves, closes the issues
+   ```
+   For each push-in, in the Resolve Edit page Inspector (Video > Transform). Background app control cannot type into Resolve, so this needs full-screen control:
+   1. `pushes goto N start`. The script moves the playhead, and the Inspector follows it. Clicking a clip can move the playhead a frame, so do not click the timeline afterwards. Check that the Inspector names the clip.
+   2. Click the keyframe diamonds of **Zoom** and **Position**, at the right of each row. They turn red. The values already are the start frame.
+   3. `pushes goto N end`. Double-click Zoom X, then select all, type the end zoom and press Return (Zoom Y follows when linked). Do the same for Position X and Y. New keyframes appear on their own.
+   4. Easing: right-click each red diamond. At the end, choose **Ease In**. At the start, once the end exists, choose **Ease In and Out**. A keyframe's menu only offers the easings its neighbours allow, and the tick does not always update, so check the result: halfway through, Zoom should be close to the average of the two values, and at a quarter it should be below the straight-line value.
+   5. **Never set a property by script on a keyframed clip**: Resolve deletes all its keyframes.
+
+   `pushes finish` reads the keyframes back (through an FCPXML export) and compares frames and values. If one is missing or wrong, it says which and leaves the step open. `--partial` saves anyway and leaves those issues open. `pushes check` does the same check without saving. `apply --pushes fusion` makes Fusion Transform push-ins instead (the old way, fully scripted).
 
 ## How to decide
 
@@ -117,6 +131,7 @@ These are what the scripts enforce. The reasons are here so you can judge shots 
 | Push-in factor | 1.06x, at most one per 30 s | `--push` |
 | No punch-ins | off | `--no-punch` |
 | No push-ins | off | `--no-push` |
+| Push-ins as Inspector keyframes or Fusion comps (`apply` only) | keyframes | `--pushes keyframes\|fusion` |
 | Gesture margin | 4% of frame height | fixed |
 | Eye-trace tolerance | 3% of frame width | fixed |
 | Max off-centre shift | 5% of frame width | fixed |
@@ -129,13 +144,13 @@ These are what the scripts enforce. The reasons are here so you can judge shots 
 - **Mode:** a fork. Framing only changes properties of existing items (the jump cuts already split them), so grades, titles, effects and hand edits survive. It never moves a cut.
 - **On-camera items** are linked audio+video items and video-only items whose shot matches a dialogue item (voiceover splits). Everything else is b-roll and keeps its framing. A file whose name contains "broll", "b-roll", "b_roll" or "b roll", and a video-only item on a track named that way, is b-roll unless you reclassify it `on_camera`.
 - **Covered by a higher track:** an on-camera item that video on a higher track covers for its whole length is never seen, so it is left as it is: not framed, not flagged, listed in the report under "Covered by a higher track (left as is)". It still counts for grouping setups. An item covered only in part is framed as usual.
-- **Hand framing is protected.** On the first run an on-camera item with non-default Zoom, Pan, Tilt, crop or a Fusion comp is left exactly as it is and listed in the report. Later runs re-solve only items that still match `.edit/framing/applied.json`; zoom never stacks.
+- **Hand framing is protected.** On the first run an on-camera item with non-default Zoom, Pan, Tilt, crop or a Fusion comp is left exactly as it is and listed in the report. Later runs re-solve only items that still match `.edit/framing/applied.json`; zoom never stacks. An item with **Inspector keyframes** is always left alone, push-ins framing keyframed included: setting a property by script would delete them. To re-frame such a clip, delete its keyframes first. `apply` also stops if a clip got keyframes after `solve`.
 - **Scaling:** the Zoom, Pan, Tilt maths is calibrated for "Scale full frame with crop" (`scaleToCrop`). "Scale entire image to fit" (`scaleToFit`) is accepted too when every framed source has the timeline's aspect (within 0.5%): the two scale the same then. Otherwise `apply` stops and names the clips with another aspect; any other mode stops it as well. `prepare` warns about this up front when Resolve is open.
-- **Push-ins** are Fusion Transform comps on the item (Resolve's Dynamic Zoom cannot be set by script). They are invisible to plain plans, so resolve-bridge detects them and warns before a later build would drop them. Details and limits in `references/resolve-notes.md`.
+- **Push-ins** are Zoom and Position keyframes in the Inspector, eased (step 7). With `--pushes fusion` they are Fusion Transform comps instead (Resolve's Dynamic Zoom cannot be set by script). resolve-bridge sees both kinds and refuses a later build that would drop them. Details and limits are in `references/resolve-notes.md`.
 
 ## Not handled yet
 
 - Sources whose aspect differs from the timeline (4:3, vertical, square): the maths for them is derived, not measured. Check the previews and treat as unsupported.
-- Variable-frame-rate sources: a Fusion push-in can end a frame or two off. `apply` checks the comp length and raises an issue when it differs from the item's length by more than one timeline frame (a source frame rate above the timeline's makes a source frame or two of difference normal rounding). Phone footage is often VFR, so check these by eye.
+- Variable-frame-rate sources: a Fusion push-in (`--pushes fusion`) can end a frame or two off. `apply` checks the comp length and raises an issue when it differs from the item's length by more than one timeline frame (a source frame rate above the timeline's makes a source frame or two of difference normal rounding). Phone footage is often VFR, so check these by eye.
 - Retimed or speed-changed items: push-ins there are unverified.
 - Framing b-roll, stabilisation, vertical reframing (`video-shorts`) and colour or vignettes (`video-color`).

@@ -104,6 +104,14 @@ class HandFramedTest(unittest.TestCase):
         # a second comp (the user's) on top of it is a hand edit
         self.assertEqual(hand_framed([item(props=dict(z), comps=2)], applied), {"V1@0"})
 
+    def test_keyframed_item_is_always_left_alone(self):
+        # even with the props framing recorded: setting a property would delete the keyframes
+        z = {"ZoomX": 1.4, "ZoomY": 1.4, "Pan": 12.0, "Tilt": -3.0}
+        it = item(props=dict(z))
+        it["keyframes"] = {"transform.scale": [[0, "1.400 1.400", ""], [100, "1.480 1.480", ""]]}
+        applied = {match_key(it): {"props": dict(z), "fusion_comps": 0}}
+        self.assertEqual(hand_framed([it], applied), {"V1@0"})
+
     def test_rippled_item_still_matched(self):
         applied = {match_key(item(start=0, end=100)): {"props": {"ZoomX": 1.15, "ZoomY": 1.15}, "fusion_comps": 0}}
         moved = item(start=500, end=600, props={"ZoomX": 1.15, "ZoomY": 1.15})

@@ -35,6 +35,7 @@ except ImportError:
 
 import apply_resolve  # noqa: E402
 import decisions as dec  # noqa: E402
+import keyframes as kfm  # noqa: E402
 import preview  # noqa: E402
 from geometry import Rect, rect_to_props, zoom_budget, zoom_of  # noqa: E402
 from measure import measure_items  # noqa: E402
@@ -653,6 +654,8 @@ def _solution(plan, s, data, setups, solve_keys, results, rects, pushes, flags, 
                            "size": round(p["from"].w / p["to"].w, 4),
                            "pivot": [round(v, 5) for v in measures[p["key"]]["eyes"]],
                            "from": _rect_json(p["from"]), "to": _rect_json(p["to"]),
+                           "from_props": _props(p["from"], tl_w, tl_h, src_of[items[p["key"]]["setup"]]),
+                           "to_props": _props(p["to"], tl_w, tl_h, src_of[items[p["key"]]["setup"]]),
                            "text": p.get("text", ""), "reason": p.get("reason", "")})
     video = _video_items(plan)
     out_flags = []
@@ -681,7 +684,8 @@ def _solution(plan, s, data, setups, solve_keys, results, rects, pushes, flags, 
         sid = next((x for x, keys in setups.items() if k in keys), None)
         left.append({"key": k, "clip": it.get("clip"), "setup": sid, "timecode": tc(it["start"] / fps),
                      "match": dec.match_key(it),
-                     "props": it.get("props") or {}, "fusion_comps": int(it.get("fusion_comps") or 0)})
+                     "props": it.get("props") or {}, "fusion_comps": int(it.get("fusion_comps") or 0),
+                     "keyframes": sorted(it.get("keyframes") or {})})
     return {"timeline": {**plan["timeline"], "version": s.state["current"]["version"]},
             "options": dataclasses.asdict(opts), "setups": out_setups, "items": items,
             "pushes": out_pushes, "proposed_push_ins": push_ins, "hand_framed": left,
@@ -823,12 +827,13 @@ def write_report(sol: dict, data: dict, path: Path, previews: dict) -> None:
                         if f["text"].startswith("push-in dropped") and repr(p.get("text", "")) in f["text"]),
                        "dropped")
             L.append(f"  - Dropped: {why}")
-    L += ["", "## Left alone (hand-framed)", ""]
+    L += ["", "## Left alone (hand-framed or keyframed)", ""]
     if sol["hand_framed"]:
         for h in sol["hand_framed"]:
             props = ", ".join(f"{k} {v}" for k, v in h["props"].items()) or "default values"
             comps = f", {h['fusion_comps']} Fusion comp(s)" if h["fusion_comps"] else ""
-            L.append(f"- {h['key']} {h['clip']} at {h['timecode']} (setup {h['setup']}): {props}{comps}")
+            kf = f", keyframed ({', '.join(h['keyframes'])})" if h.get("keyframes") else ""
+            L.append(f"- {h['key']} {h['clip']} at {h['timecode']} (setup {h['setup']}): {props}{comps}{kf}")
     else:
         L.append("None.")
     L += ["", "## Covered by a higher track (left as is)", ""]
@@ -892,14 +897,105 @@ def apply(opt) -> int:
         (int(plan["timeline"]["width"]), int(plan["timeline"]["height"])))
     sol = run_solve(s, opt, workdir)
     _print_summary(sol, workdir)
-    entry, issues, skipped = apply_resolve.apply(s, sol)
+    entry, issues, skipped = apply_resolve.apply(s, sol, push_mode=opt.pushes)
     print(f"v{entry['version']:02d} saved: {entry['timeline']}")
+    todo = kfm.load(fdir / kfm.TODO_NAME)
+    if todo:
+        print(f"{len(todo)} push-in(s) hold their start frame. Set their keyframes in the Inspector: "
+              "framing.py pushes begin (see SKILL.md).")
     if issues or skipped:
         line = f"{len(issues)} issues added to {s.checklist_path.name}"
         if issues:
             line += " (" + ", ".join(i["id"] for i in issues) + ")"
         print(line + (f", {skipped} already open" if skipped else ""))
     return 0
+
+
+# ---------------------------------------------------------------- push-in keyframes
+
+def _timecode(frame: int, fps: float) -> str:
+    fr = int(round(fps))
+    sec, f = divmod(int(frame), fr)
+    return f"{sec // 3600:02d}:{sec // 60 % 60:02d}:{sec % 60:02d}:{f:02d}"
+
+
+def _push_timeline(s):
+    """The timeline push-in keyframes go on: the pending 'pushins' step's, else the current one."""
+    pend = s.state.get("pending")
+    if pend:
+        if pend["step"] != "pushins":
+            raise FramingError(f"step '{pend['step']}' is in progress; finish or abandon it first")
+        tl = rvs.find_timeline(s.project, pend["timeline"])
+        if tl is None:
+            raise FramingError(f"the pending timeline '{pend['timeline']}' is not in Resolve")
+        return tl, True
+    return s.current_timeline(), False
+
+
+def pushes(opt) -> int:
+    """List, begin, goto, check and finish the Inspector keyframes of push-ins (keyframes.py)."""
+    workdir = Path(opt.workdir).resolve()
+    fdir, _ = _paths(workdir)
+    todo_path = fdir / kfm.TODO_NAME
+    todo = kfm.load(todo_path)
+    if not todo:
+        print("No push-ins waiting for keyframes.")
+        return 0
+    if opt.action == "list":
+        for n, p in enumerate(todo, 1):
+            print(f"{n}. {p['where']}: {kfm.issue_text(p)}")
+        return 0
+    s = _session(workdir, need_resolve=True)
+    if opt.action == "begin":
+        if not s.state.get("pending"):
+            s.begin_step("pushins")
+        tl, _ = _push_timeline(s)
+        print(f"working on '{tl.GetName()}'. Push-ins to keyframe (frames are from each clip's start):")
+        for n, p in enumerate(todo, 1):
+            print(f"{n}. {p['where']}: frames {p['start_frame']}-{p['end_frame']}. {kfm.issue_text(p)}\n"
+                  f"   framing.py pushes goto {n} start / goto {n} end")
+        print("When done: framing.py pushes finish")
+        return 0
+    tl, pending = _push_timeline(s)
+    if opt.action == "goto":
+        if not opt.n or not 1 <= opt.n <= len(todo) or opt.at not in ("start", "end"):
+            raise FramingError(f"usage: pushes goto <1-{len(todo)}> start|end")
+        p = todo[opt.n - 1]
+        fps = float(tl.GetSetting("timelineFrameRate") or 24)
+        frame = tl.GetStartFrame() + p["item_start"] + p["start_frame" if opt.at == "start" else "end_frame"]
+        s.project.SetCurrentTimeline(tl)
+        tc = _timecode(frame, fps)
+        if not tl.SetCurrentTimecode(tc):
+            raise FramingError(f"Resolve did not move the playhead to {tc}")
+        print(f"playhead at {tc}: {p['clip']} {opt.at} "
+              f"(Zoom {p['from' if opt.at == 'start' else 'to']['ZoomX']:.4f})")
+        return 0
+    plan = rvs.export_plan(tl, s.resolve)
+    done, left = [], []
+    for p in todo:
+        probs = kfm.problems(plan, p)
+        (left if probs else done).append(p)
+        print(f"{'ok  ' if not probs else 'todo'} {p['where']}" + ("" if not probs else ": " + "; ".join(probs)))
+    if opt.action == "finish":
+        if not pending:
+            raise FramingError("no push-in step in progress: run pushes begin first")
+        if left and not opt.partial:
+            print(f"{len(left)} push-in(s) not done: the step stays open. Fix them, or finish with --partial "
+                  "(their checklist issues stay open).")
+            return 1
+        what = ", ".join(p["where"] for p in done) or "none"
+        entry = s.finish_step(f"push-ins keyframed in the Inspector (Zoom + Position, eased): {what}")
+        print(f"v{entry['version']:02d} saved: {entry['timeline']}")
+    elif pending:
+        print("(check only: the push-in step is still open; run pushes finish to save it)")
+    open_ids = {i["id"] for i in s.state.get("issues", []) if i.get("status") != "resolved"}
+    if opt.action == "finish" or not pending:   # done keyframes are saved (or recorded by sync)
+        for p in done:
+            if p.get("issue") in open_ids:
+                s.resolve_issue(p["issue"], "keyframed in the Inspector")
+        kfm.save(todo_path, left)
+        s.write_checklist()
+    return 0 if not left else 1
 
 
 # ---------------------------------------------------------------- CLI
@@ -915,9 +1011,19 @@ def main(argv=None) -> int:
             p.add_argument("--no-push", action="store_true", help="no push-ins")
             p.add_argument("--punch", type=float, help="punch-in factor (default 1.15)")
             p.add_argument("--push", type=float, help="push-in factor (default 1.06)")
+        if name == "apply":
+            p.add_argument("--pushes", choices=("keyframes", "fusion"), default="keyframes",
+                           help="push-ins as Inspector keyframes (default; set through the pushes "
+                                "command) or as Fusion Transform comps")
+    p = sub.add_parser("pushes", help="Inspector keyframes for push-ins: list, begin, goto, check, finish")
+    p.add_argument("action", choices=("list", "begin", "goto", "check", "finish"))
+    p.add_argument("n", nargs="?", type=int, help="goto: push-in number from the list")
+    p.add_argument("at", nargs="?", default="start", help="goto: start or end")
+    p.add_argument("--partial", action="store_true", help="finish: save even if some push-ins are not done")
+    p.add_argument("--workdir", default=os.environ.get("RVS_WORKDIR", "."))
     opt = ap.parse_args(argv)
     try:
-        return {"prepare": prepare, "solve": solve, "apply": apply}[opt.cmd](opt)
+        return {"prepare": prepare, "solve": solve, "apply": apply, "pushes": pushes}[opt.cmd](opt)
     except (FramingError, rvs.RvsError, apply_resolve.ApplyError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 2

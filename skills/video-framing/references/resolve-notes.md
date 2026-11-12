@@ -169,3 +169,18 @@ spline.SetKeyFrames({t0: {1: 1.00, "RH": {1: dt, 2: 0.0}},
   length to the item length in source frames after adding a push-in and raises an issue when they
   differ by more than one timeline frame (the source-frame difference times timeline fps / source
   fps; 2 source frames of a 60 fps clip on a 24 fps timeline is 0.8, not flagged); the push-in is kept.
+
+## Inspector keyframes (Resolve 21)
+
+- **The Scripting API has no keyframe calls for timeline items.** This was checked against the v20 (May 2025) and v21 (July 2026) README. `SetProperty("ZoomX", v)` sets one value. On an item that has keyframes, it **deletes all of them** and leaves that value. `GetProperty` then returns one value (the first keyframe's) whatever the playhead.
+- **Reading:** `Timeline.Export(path, resolve.EXPORT_FCPXML_1_10, resolve.EXPORT_NONE)` writes a bundle `path/Info.fcpxml`. A keyframed clip has `<adjust-transform><param name="scale|position"><keyframeAnimation><keyframe value time interp|curve>`.
+  - Position is in percent of the timeline height: Pan -40 px at 1080p is -3.7037.
+  - Keyframe `time` is source time, on the source's frame grid, so it can sit up to one timeline frame early: a keyframe set on frame 0 reads -0.6. Round up.
+  - Scale carries the easing (`easeOut`, `easeIn`). Position shows `curve="linear"` (the spatial path), even when its timing is eased.
+  - OTIO and DRT exports were tried. OTIO has no keyframes; DRT is a zip and was not explored.
+- **Writing by hand (computer use):**
+  - `Timeline.SetCurrentTimecode` moves the playhead, and the Inspector follows it, showing the clip under the playhead.
+  - Background app control can click but cannot type into Resolve or drive the timeline keys, so full-screen control is needed.
+  - Inspector diamonds: a click adds a keyframe at the playhead. Typing a value on another frame of a keyframed parameter adds one there.
+  - Right-clicking a red diamond offers Linear / Ease In / Ease Out / Ease In and Out, but only those its neighbours allow: the last keyframe gets Linear and Ease In. The tick can be stale, so check the numbers instead.
+  - The timeline's own keyframe lane needs a tall track and a zoomed timeline; the Inspector menu is easier.

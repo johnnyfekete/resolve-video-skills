@@ -1,8 +1,11 @@
 """Apply a framing solution to Resolve through resolve-bridge.
 
-Forks the current timeline (`begin_step`), sets Zoom/Pan/Tilt on every solved item, adds the
-push-in Fusion comps (recipe and call forms in references/resolve-notes.md), saves and records the
-step (`finish_step`), then writes applied.json and turns the flags into checklist issues. On any
+Forks the current timeline (`begin_step`), sets Zoom/Pan/Tilt on every solved item, saves and
+records the step (`finish_step`), then writes applied.json and turns the flags into checklist
+issues. Push-ins: by default (push_mode "keyframes") the item holds the push's start frame and a
+to-do for Inspector keyframes is written (keyframes.py: the API cannot create keyframes); with
+push_mode "fusion" a keyframed Fusion Transform is added instead (recipe and call forms in
+references/resolve-notes.md). On any
 error the step is abandoned: the forked timeline stays in Resolve for inspection, the previous
 version stays current.
 """
@@ -14,6 +17,7 @@ import sys
 from pathlib import Path
 
 import decisions as dec
+import keyframes as kfm
 import rvs
 
 PUSH_TOOL = "rvs_pushin"
@@ -232,17 +236,30 @@ def _summary(solution: dict) -> str:
             f"{len(solution.get('hand_framed', []))} hand-framed left alone")
 
 
-def apply(session, solution: dict, applied_path=None) -> tuple[dict, list[dict], int]:
+def _keyframed(session) -> set:
+    """(track, start) of items with Inspector keyframes on the current version."""
+    try:
+        plan = session.load_plan()
+    except Exception:
+        return set()
+    return {(d.get("track"), d["start"]) for d in plan.get("items", []) if d.get("keyframes")}
+
+
+def apply(session, solution: dict, applied_path=None, push_mode: str = "keyframes") -> tuple[dict, list[dict], int]:
     """Fork, frame, push, save and record. Returns (history entry, issues added, duplicates skipped)."""
+    if push_mode not in ("keyframes", "fusion"):
+        raise ApplyError(f"unknown push mode {push_mode!r}")
     applied_path = Path(applied_path) if applied_path else Path(session.dir) / "framing" / "applied.json"
     pending = applied_path.with_name(applied_path.name + ".pending")
     pushes = {p["key"]: p for p in solution.get("pushes", [])}
+    fusion_push = {k for k in pushes if push_mode == "fusion"}
     tl_fps = float((solution.get("timeline") or {}).get("fps") or 24.0)
     extra: list[dict] = []
     tl = session.begin_step("framing")
     finished = False
     try:
         index = _index(tl)
+        keyframed = _keyframed(session)
         entries = {}
         for key, e in solution["items"].items():
             item = index.get((e["track"], e["start"]))
@@ -250,6 +267,9 @@ def apply(session, solution: dict, applied_path=None) -> tuple[dict, list[dict],
                 found = item.GetName() if item is not None else "nothing"
                 raise ApplyError(f"{key} ({e['clip']}) is not on the new timeline (found {found}); "
                                  "the timeline changed since solve")
+            if (e["track"], e["start"]) in keyframed:   # setting a property would delete them
+                raise ApplyError(f"{key} ({e['clip']}) has Inspector keyframes now; run solve again "
+                                 "(keyframed clips are left alone)")
             props = {k: e["props"][k] for k in FRAMING_SET}
             old = _own_comps(item)
             for n, name in enumerate(old):  # free the name for the new comp
@@ -257,7 +277,7 @@ def apply(session, solution: dict, applied_path=None) -> tuple[dict, list[dict],
                     _rename(item, name, f"{PUSH_COMP}_old{n}")
                     old[n] = f"{PUSH_COMP}_old{n}"
             got = _set_props(item, key, props)
-            if key in pushes:
+            if key in fusion_push:
                 before = set(_comp_names(item))
                 comp = add_pushin(item, pushes[key])
                 added = [x for x in _comp_names(item) if x not in before]
@@ -267,13 +287,16 @@ def apply(session, solution: dict, applied_path=None) -> tuple[dict, list[dict],
                 extra += _timing_flag(key, e, pushes[key], comp, tl_fps)
             _drop_comps(item, old)  # after the new comp exists: Resolve keeps an item's only comp
             holders = _with_tool(item)
-            if holders != ([PUSH_COMP] if key in pushes else []):
-                raise ApplyError(f"{key}: expected {'one push-in comp' if key in pushes else 'no push-in'}, "
+            if holders != ([PUSH_COMP] if key in fusion_push else []):
+                raise ApplyError(f"{key}: expected {'one push-in comp' if key in fusion_push else 'no push-in comp'}, "
                                  f"found the push-in tool in {holders or 'no comp'}")
             entries[e["match"]] = {"props": _recorded(got), "fusion_comps": rvs.fusion_comp_count(item)}
         applied = _applied(applied_path, solution, entries)
         dec.save_applied(pending, applied)   # survives a failure right after finish_step
-        entry = session.finish_step(_summary(solution))
+        summary = _summary(solution)
+        if pushes and push_mode == "keyframes":
+            summary += " (push-ins hold their start frame; keyframes to set in the Inspector)"
+        entry = session.finish_step(summary)
         finished = True
         os.replace(pending, applied_path)
     except BaseException as e:
@@ -290,6 +313,16 @@ def apply(session, solution: dict, applied_path=None) -> tuple[dict, list[dict],
               "inspection; the previous version is still current.", file=sys.stderr)
         raise
     added, skipped = [], 0
+    todo_path = applied_path.with_name(kfm.TODO_NAME)
+    todo = kfm.todo_from_solution(solution) if push_mode == "keyframes" else []
+    for p in todo:
+        issue = session.add_issue("framing", kfm.issue_text(p), p["where"])
+        if issue:
+            p["issue"] = issue["id"]
+            added.append(issue)
+        else:
+            skipped += 1
+    kfm.save(todo_path, todo)
     for f in solution.get("flags", []) + extra:   # plain words; keys and coordinates stay in REPORT.md
         issue = session.add_issue("framing", f["text"], f.get("where"))
         if issue:

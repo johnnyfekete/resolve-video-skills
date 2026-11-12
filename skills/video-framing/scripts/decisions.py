@@ -162,9 +162,14 @@ def _same(a: dict, b: dict) -> bool:
 
 
 def hand_framed(cam_items, applied: dict | None) -> set[str]:
-    """`item_key`s of on-camera items framing must leave alone."""
+    """`item_key`s of on-camera items framing must leave alone. An item with Inspector keyframes
+    is always left alone, framing's own keyframed push-ins too: setting a property by script
+    deletes an item's keyframes."""
     out = set()
     for it in cam_items:
+        if it.get("keyframes"):
+            out.add(item_key(it))
+            continue
         cur, comps = _framing(it), int(it.get("fusion_comps") or 0)
         entry = (applied or {}).get(match_key(it))
         if entry is None:

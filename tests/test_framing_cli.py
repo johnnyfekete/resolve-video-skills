@@ -15,6 +15,7 @@ sys.path.insert(0, str(ROOT / "skills" / "video-framing" / "scripts"))
 sys.path.insert(0, str(ROOT / "skills" / "resolve-bridge" / "scripts"))
 
 import apply_resolve  # noqa: E402
+import keyframes as kfm  # noqa: E402
 import decisions  # noqa: E402
 import framing  # noqa: E402
 import measure  # noqa: E402
@@ -549,11 +550,12 @@ class ApplyTest(unittest.TestCase):
     PUSH = {"key": "V1@0", "comp_start": 5.0, "comp_end": 200.0, "comp_len": 600.0, "size": 1.06,
             "pivot": [0.5, 0.3], "src_fps": 60.0}
 
-    def _apply(self, item, pushes, session=None):
+    def _apply(self, item, pushes, session=None, push_mode="fusion"):
         sol = _solution([0])
         sol["pushes"] = pushes
         with tempfile.TemporaryDirectory() as td:
-            apply_resolve.apply(session or FakeSession(FakeTimeline([item])), sol, Path(td) / "applied.json")
+            apply_resolve.apply(session or FakeSession(FakeTimeline([item])), sol, Path(td) / "applied.json",
+                                push_mode=push_mode)
             return json.loads((Path(td) / "applied.json").read_text())
 
     def test_push_comp_built_and_named(self):
@@ -869,3 +871,70 @@ class PreviewAttemptTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class KeyframePushApplyTest(unittest.TestCase):
+    PUSH = {"key": "V1@0", "clip": "S01_A.MOV", "start_frame": 0, "end_frame": 120,
+            "start_s": 0.0, "end_s": 5.0, "size": 1.06,
+            "from_props": {"ZoomX": 1.5, "ZoomY": 1.5, "Pan": 10.0, "Tilt": -5.0},
+            "to_props": {"ZoomX": 1.59, "ZoomY": 1.59, "Pan": 12.0, "Tilt": -9.0}}
+
+    def _run(self, session):
+        sol = _solution([0])
+        sol["pushes"] = [self.PUSH]
+        with tempfile.TemporaryDirectory() as td:
+            apply_resolve.apply(session, sol, Path(td) / "applied.json")
+            return json.loads((Path(td) / "keyframes_todo.json").read_text())
+
+    def test_push_holds_start_frame_and_writes_a_todo_and_an_issue(self):
+        item = FakeItem("S01_A.MOV", 86400)
+        s = FakeSession(FakeTimeline([item]))
+        todo = self._run(s)
+        self.assertEqual(item.comps, {})   # no Fusion comp
+        self.assertEqual(item.props["ZoomX"], 1.5)
+        self.assertEqual(len(todo), 1)
+        self.assertEqual(todo[0]["to"], {"ZoomX": 1.59, "Pan": 12.0, "Tilt": -9.0})
+        self.assertEqual(todo[0]["issue"], "I1")
+        self.assertIn("Inspector", s.issues[0][1])
+        self.assertIn("keyframes to set in the Inspector", s.calls[-1][1])
+
+    def test_item_keyframed_since_solve_is_refused(self):
+        s = FakeSession(FakeTimeline([FakeItem("S01_A.MOV", 86400)]))
+        s.load_plan = lambda: {"items": [{"track": 1, "start": 0, "keyframes": {"transform.scale": [[0, "1", ""]]}}]}
+        with self.assertRaisesRegex(apply_resolve.ApplyError, "keyframes"):
+            self._run(s)
+        self.assertEqual(s.calls[-1], ("abandon",))
+
+
+class KeyframeCheckTest(unittest.TestCase):
+    TODO = {"key": "V1@100", "clip": "a.mov", "track": 1, "item_start": 100, "start_frame": 0,
+            "end_frame": 120, "start_s": 4.17, "end_s": 9.17,
+            "from": {"ZoomX": 1.5, "Pan": -40.0, "Tilt": 2.2933},
+            "to": {"ZoomX": 1.59, "Pan": -35.5736, "Tilt": -8.3714}, "where": "a.mov at 0:04.17"}
+
+    def _plan(self, kf):
+        d = {"clip": "a.mov", "track": 1, "start": 100, "end": 240}
+        if kf is not None:
+            d["keyframes"] = kf
+        return {"timeline": {"height": 1080}, "items": [d]}
+
+    GOOD = {"transform.scale": [[0, "1.500 1.500", "easeOut"], [120, "1.590 1.590", "easeIn"]],
+            "transform.position": [[0, "-3.704 0.212", "linear"], [121, "-3.294 -0.775", "linear"]]}
+
+    def test_matching_keyframes_are_done(self):
+        self.assertEqual(kfm.problems(self._plan(self.GOOD), self.TODO), [])
+
+    def test_missing_keyframes_are_reported(self):
+        probs = kfm.problems(self._plan(None), self.TODO)
+        self.assertEqual(len(probs), 3)
+
+    def test_wrong_end_zoom_is_reported(self):
+        kf = {**self.GOOD, "transform.scale": [[0, "1.500 1.500", ""], [120, "1.700 1.700", ""]]}
+        probs = kfm.problems(self._plan(kf), self.TODO)
+        self.assertEqual(len(probs), 1)
+        self.assertIn("Zoom", probs[0])
+
+    def test_moved_clip_is_reported(self):
+        plan = self._plan(self.GOOD)
+        plan["items"][0]["start"] = 90
+        self.assertIn("no longer", kfm.problems(plan, self.TODO)[0])
